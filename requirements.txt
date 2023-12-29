@@ -1,3 +1,6 @@
-gradescope-utils>=0.3.1
 pygame
 chess
+pandas
+io
+re
+chess.pgn
