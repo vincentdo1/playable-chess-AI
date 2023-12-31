@@ -163,32 +163,34 @@ def generate_batches(file_path, batch_size=32, sequence_length=10):
             batch_move_sequences = []
             batch_targets = []  # Reset for next batch
 
+def main():
+    # Training Loop
+    model = create_chess_model()
 
-# Training Loop
-model = create_chess_model()
+    epochs = 10  # Set the number of epochs
+    batch_size = 32  # Set the batch size
+    #train_file_path = 'C:/Users/vince/Downloads/games.pgn'  # Path to training PGN file
+    train_file_path = 'C:/Users/vince/Downloads/GM_games_eval - Copy.pgn'  # Path to training PGN file
+    #validation_file_path = 'C:/Users/vince/Downloads/validation.pgn'  # Path to validation PGN file
+    validation_file_path = 'C:/Users/vince/Downloads/magnus_evalv2.pgn'  # Path to validation PGN file
 
-epochs = 10  # Set the number of epochs
-batch_size = 32  # Set the batch size
-train_file_path = 'C:/Users/vince/Downloads/games.pgn'  # Path to training PGN file
-# train_file_path = 'C:/Users/vince/Downloads/GM_games_eval - Copy.pgn'  # Path to training PGN file
-validation_file_path = 'C:/Users/vince/Downloads/validation.pgn'  # Path to validation PGN file
-#validation_file_path = 'C:/Users/vince/Downloads/magnus_evalv2.pgn'  # Path to validation PGN file
-
-for epoch in range(epochs):
-    print(f"Epoch {epoch+1}/{epochs}")
-    
-    # Training
-    for (batch_board_tensors, batch_move_sequences), batch_targets in generate_batches(train_file_path, batch_size):
-        train_loss, train_accuracy = model.train_on_batch([batch_board_tensors, batch_move_sequences], batch_targets)
+    for epoch in range(epochs):
+        print(f"Epoch {epoch+1}/{epochs}")
+        
+        # Training
+        for (batch_board_tensors, batch_move_sequences), batch_targets in generate_batches(train_file_path, batch_size):
+            train_loss, train_accuracy = model.train_on_batch([batch_board_tensors, batch_move_sequences], batch_targets)
 
 
 
-    # Validation
-    validation_loss, validation_accuracy = 0, 0
-    validation_batches = 0
-    for batch_board_tensors, batch_move_vectors in generate_batches(validation_file_path, batch_size):
-        loss, accuracy = model.test_on_batch(batch_board_tensors, batch_move_vectors)
-        validation_loss += loss
-        validation_accuracy += accuracy
-        validation_batches += 1
-model.summary()
+        # Validation
+        validation_loss, validation_accuracy = 0, 0
+        validation_batches = 0
+        for batch_board_tensors, batch_move_vectors in generate_batches(validation_file_path, batch_size):
+            loss, accuracy = model.test_on_batch(batch_board_tensors, batch_move_vectors)
+            validation_loss += loss
+            validation_accuracy += accuracy
+            validation_batches += 1
+    model.summary()
+    model.save('data/grandmaster_model_v1.h5')
+    model.save('data/grandmaster_model_v1.keras')
