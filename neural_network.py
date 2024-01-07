@@ -11,43 +11,82 @@ from tensorflow.keras.utils import to_categorical
 import numpy as np
 
 piece_to_index = {
-    'p': 0, 'n': 1, 'b': 2, 'r': 3, 'q': 4, 'k': 5,
-    'P': 6, 'N': 7, 'B': 8, 'R': 9, 'Q': 10, 'K': 11
-}
+        'p': 0, 'n': 1, 'b': 2, 'r': 3, 'q': 4, 'k': 5,
+        'P': 6, 'N': 7, 'B': 8, 'R': 9, 'Q': 10, 'K': 11,
+        'ck': 12, 'cq': 13, 'CK': 14, 'CQ': 15  # Castling rights
+    }
 
 def fen_to_tensor(fen):
-    # Initialize an empty tensor
-    tensor = np.zeros((8, 8, 14), dtype=np.float32)
-    
-    # Split the FEN string to get the piece placement
-    pieces = fen.split(' ')[0]
-    rows = pieces.split('/')
-    
+    tensor = np.zeros((8, 8, 16), dtype=np.float32)
+    parts = fen.split(' ')
+    rows = parts[0].split('/')
     for i, row in enumerate(rows):
+        # tensor_row = i
+        tensor_row = 7 - i
         j = 0
         for char in row:
             if char.isdigit():
-                # Empty squares
                 j += int(char)
             else:
-                # Set the corresponding layer for the piece
-                tensor[i, j, piece_to_index[char]] = 1
+                tensor[tensor_row, j, piece_to_index[char]] = 1
+                # tensor[tensor_row, j, piece_to_index[char]] = 1
                 j += 1
+    castling = parts[2]
+    if 'K' in castling:
+        tensor[:, :, piece_to_index['CK']] = 1
+    if 'Q' in castling:
+        tensor[:, :, piece_to_index['CQ']] = 1
+    if 'k' in castling:
+        tensor[:, :, piece_to_index['ck']] = 1
+    if 'q' in castling:
+        tensor[:, :, piece_to_index['cq']] = 1
     return tensor
+
 
 def square_to_index(square):
     # Converts a square in algebraic notation to an index (0-63)
-    rank = 8 - int(square[1]) # Rank (row)
-    file = ord(square[0]) - ord('a') # File (column)
+    square = square.lower()
+
+    # Validation for the length of the input
+    # if len(square) != 2:
+    #     raise ValueError("Invalid square length")
+
+    # Validation for file
+    file = ord(square[0]) - ord('a')
+    if file < 0 or file > 7:
+        raise ValueError("Invalid file")
+
+    # Validation for rank
+    try:
+        rank = 8 - int(square[1])
+    except ValueError:
+        raise ValueError("Invalid rank")
+
+    if rank < 0 or rank > 7:
+        raise ValueError("Invalid rank")
+
     return 8 * rank + file
 
 def move_to_vector(move):
     # Converts a chess move to a one-hot encoded vector
-    vector = np.zeros(128, dtype=np.float32)
-    from_square = square_to_index(str(move)[:2])
-    to_square = square_to_index(str(move)[2:])
+    # TODO: possibly Check for castling, en passant, pawn promotion
+    vector = np.zeros(132, dtype=np.float32)
+    from_square = square_to_index(move.uci()[:2])
+    to_square = square_to_index(move.uci()[2:4])
     vector[from_square] = 1
     vector[64 + to_square] = 1
+
+    # Handling pawn promotion
+    if move.promotion is not None:
+        if move.promotion == chess.KNIGHT:
+            vector[128] = 1  # Knight promotion
+        elif move.promotion == chess.BISHOP:
+            vector[129] = 1  # Bishop promotion
+        elif move.promotion == chess.ROOK:
+            vector[130] = 1  # Rook promotion
+        elif move.promotion == chess.QUEEN:
+            vector[131] = 1  # Queen promotion
+
     return vector
 
 def move_sequence_to_vector(move_sequence, max_length=10):
@@ -82,7 +121,6 @@ def parse_pgn(file_path, sequence_length=10):
 
             board = game.board()
             recent_moves = []
-
             for node in game.mainline():
                 move = node.move
                 fen = board.fen()
@@ -163,16 +201,19 @@ def generate_batches(file_path, batch_size=32, sequence_length=10):
             batch_move_sequences = []
             batch_targets = []  # Reset for next batch
 
+for board_tensor, recent_moves, move_vector, evaluation, correct_move_vector, played_best_move, target_index  in parse_pgn('C:/Users/vince/Downloads/games.pgn'):
+        tmp = 1
+'''
 def main():
     # Training Loop
     model = create_chess_model()
 
     epochs = 10  # Set the number of epochs
     batch_size = 32  # Set the batch size
-    #train_file_path = 'C:/Users/vince/Downloads/games.pgn'  # Path to training PGN file
-    train_file_path = 'C:/Users/vince/Downloads/GM_games_eval - Copy.pgn'  # Path to training PGN file
-    #validation_file_path = 'C:/Users/vince/Downloads/validation.pgn'  # Path to validation PGN file
-    validation_file_path = 'C:/Users/vince/Downloads/magnus_evalv2.pgn'  # Path to validation PGN file
+    train_file_path = 'C:/Users/vince/Downloads/games.pgn'  # Path to training PGN file
+    #train_file_path = 'C:/Users/vince/Downloads/GM_games_eval - Copy.pgn'  # Path to training PGN file
+    validation_file_path = 'C:/Users/vince/Downloads/validation.pgn'  # Path to validation PGN file
+    #validation_file_path = 'C:/Users/vince/Downloads/magnus_evalv2.pgn'  # Path to validation PGN file
 
     for epoch in range(epochs):
         print(f"Epoch {epoch+1}/{epochs}")
@@ -192,5 +233,6 @@ def main():
             validation_accuracy += accuracy
             validation_batches += 1
     model.summary()
-    model.save('data/grandmaster_model_v1.h5')
-    model.save('data/grandmaster_model_v1.keras')
+    # model.save('data/grandmaster_model_v1.h5')
+    # model.save('data/grandmaster_model_v1.keras')
+'''
