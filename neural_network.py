@@ -90,25 +90,59 @@ def move_to_vector(move):
     return vector
 
 def move_sequence_to_vector(move_sequence, max_length=10):
-    # Initialize a zero matrix for the sequence with shape (max_length, 128)
-    sequence_vector = np.zeros((max_length, 128), dtype=np.float32)
+    # Initialize a zero matrix for the sequence with shape (max_length, 132)
+    sequence_vector = np.zeros((max_length, 132), dtype=np.float32)
 
     # Fill the matrix with move vectors
     for i, move in enumerate(move_sequence[-max_length:]):
-        from_square = square_to_index(str(move)[:2])
-        to_square = square_to_index(str(move)[2:])
-        move_vector = np.zeros(128, dtype=np.float32)
+        from_square = square_to_index(move.uci()[:2])
+        to_square = square_to_index(move.uci()[2:4])
+        move_vector = np.zeros(132, dtype=np.float32)
         move_vector[from_square] = 1
         move_vector[64 + to_square] = 1
+
+        # Handling pawn promotion
+        if move.promotion is not None:
+            if move.promotion == chess.KNIGHT:
+                move_vector[128] = 1  # Knight promotion
+            elif move.promotion == chess.BISHOP:
+                move_vector[129] = 1  # Bishop promotion
+            elif move.promotion == chess.ROOK:
+                move_vector[130] = 1  # Rook promotion
+            elif move.promotion == chess.QUEEN:
+                move_vector[131] = 1  # Queen promotion
+
         sequence_vector[i] = move_vector
+
     return sequence_vector
 
 def move_to_index(move, board):
+
+    if move not in board.legal_moves:
+        raise ValueError("Invalid move")
+
+    move_index = np.zeros(132, dtype=int)
     from_index = move.from_square
     to_index = move.to_square
-    move_index = np.zeros(128, dtype=int)
+
+    # Encode the 'from' and 'to' squares
     move_index[from_index] = 1
     move_index[64 + to_index] = 1
+
+    # Handling pawn promotion
+    if move.promotion is not None:
+        promotion_offset = 128  # Offset for the promotion piece encoding
+        # Map the promotion piece to the corresponding index
+        promotion_piece = move.promotion
+        if promotion_piece == chess.KNIGHT:
+            move_index[promotion_offset] = 1  # Knight promotion
+        elif promotion_piece == chess.BISHOP:
+            move_index[promotion_offset + 1] = 1  # Bishop promotion
+        elif promotion_piece == chess.ROOK:
+            move_index[promotion_offset + 2] = 1  # Rook promotion
+        elif promotion_piece == chess.QUEEN:
+            move_index[promotion_offset + 3] = 1  # Queen promotion
+
     return move_index
 
 # Parsing the PGN file to extract relevant data
