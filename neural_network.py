@@ -182,8 +182,8 @@ def parse_pgn(file_path, sequence_length=10):
                 board.push(move)
 
 def create_chess_model():
-    # Board input: 8x8x14 tensor
-    board_input = Input(shape=(8, 8, 14), name='board_input')
+    # Board input: 8x8x16 tensor
+    board_input = Input(shape=(8, 8, 16), name='board_input')
 
     # CNN layers for board analysis
     x = Conv2D(64, kernel_size=(3, 3), activation='relu')(board_input)
@@ -191,19 +191,19 @@ def create_chess_model():
     x = Flatten()(x)
 
     # Move sequence input
-    move_input = Input(shape=(10, 128), name='move_input')  # Example: 10 timesteps, each with 128 features
+    move_input = Input(shape=(10, 132), name='move_input')  # Example: 10 timesteps, each with 132 features
     y = LSTM(64)(move_input)
 
     # Combine CNN and RNN outputs
     combined = tf.keras.layers.concatenate([x, y])
 
     # Dense layers for decision making
-    z = Dense(128, activation='relu')(combined)
+    z = Dense(132, activation='relu')(combined)
     z = Dropout(0.5)(z)  # Dropout for regularization
     z = Dense(64, activation='relu')(z)
 
     # Output layer for move prediction
-    move_output = Dense(128, activation='softmax', name='move_output')(z)
+    move_output = Dense(132, activation='softmax', name='move_output')(z)
 
     # Creating the model
     model = Model(inputs=[board_input, move_input], outputs=[move_output])
@@ -235,19 +235,18 @@ def generate_batches(file_path, batch_size=32, sequence_length=10):
             batch_move_sequences = []
             batch_targets = []  # Reset for next batch
 
-for board_tensor, recent_moves, move_vector, evaluation, correct_move_vector, played_best_move, target_index  in parse_pgn('C:/Users/vince/Downloads/games.pgn'):
-        tmp = 1
-'''
+# for board_tensor, recent_moves, move_vector, evaluation, correct_move_vector, played_best_move, target_index  in parse_pgn('C:/Users/vince/Downloads/games.pgn'):
+#         tmp = 1
 def main():
     # Training Loop
     model = create_chess_model()
 
     epochs = 10  # Set the number of epochs
     batch_size = 32  # Set the batch size
-    train_file_path = 'C:/Users/vince/Downloads/games.pgn'  # Path to training PGN file
-    #train_file_path = 'C:/Users/vince/Downloads/GM_games_eval - Copy.pgn'  # Path to training PGN file
-    validation_file_path = 'C:/Users/vince/Downloads/validation.pgn'  # Path to validation PGN file
-    #validation_file_path = 'C:/Users/vince/Downloads/magnus_evalv2.pgn'  # Path to validation PGN file
+    # train_file_path = 'C:/Users/vince/Downloads/games.pgn'  # Path to training PGN file
+    train_file_path = 'C:/Users/vince/Downloads/GM_games_eval - Copy.pgn'  # Path to training PGN file
+    # validation_file_path = 'C:/Users/vince/Downloads/validation.pgn'  # Path to validation PGN file
+    validation_file_path = 'C:/Users/vince/Downloads/magnus_evalv2.pgn'  # Path to validation PGN file
 
     for epoch in range(epochs):
         print(f"Epoch {epoch+1}/{epochs}")
@@ -267,6 +266,9 @@ def main():
             validation_accuracy += accuracy
             validation_batches += 1
     model.summary()
-    # model.save('data/grandmaster_model_v1.h5')
-    # model.save('data/grandmaster_model_v1.keras')
-'''
+    model.save('data/grandmaster_model_v2.h5')
+    model.save('data/grandmaster_model_v2.keras')
+    # model.save('data/tmp.keras')
+
+if __name__ == '__main__':
+    main()

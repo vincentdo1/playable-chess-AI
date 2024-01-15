@@ -1,39 +1,33 @@
 from tensorflow.keras.models import load_model
 import numpy as np
 from neural_network import fen_to_tensor, move_sequence_to_vector
-from prediction_model import index_to_move
 import chess
 
 print("LOADING MODEL!!!!!!!!!!!!!!!!!!!!")
-model = load_model('data/grandmaster_model_v1.keras')
+model = load_model('data/grandmaster_model_v2.keras')
+# model = load_model('data/tmp.keras')
 
-def index_to_move(index, board):
-    """
-    Converts a predicted move index back to a standard chess move in UCI format.
+def index_to_move(predicted_index, board):
+    if predicted_index < 64:
+        # The index represents only a 'from' square, which is not sufficient to determine the move.
+        return None
+    elif predicted_index < 128:
+        # Normal move (not a promotion). The index can be broken down into 'from' and 'to' squares.
+        from_square_index = predicted_index % 64
+        to_square_index = predicted_index // 64
+        from_square = chess.SQUARE_NAMES[from_square_index]
+        to_square = chess.SQUARE_NAMES[to_square_index]
+        move_uci = from_square + to_square
+    else:
+        # Pawn promotion. Additional logic is needed here to determine the correct move.
+        return None  # Placeholder for promotion logic
 
-    :param index: The index of the predicted move in the output vector.
-    :param board: The current board state as a chess.Board object.
-    :return: The move in UCI format (e.g., 'e2e4').
-    """
-
-    # Assuming the first 64 indices are for 'from' squares and the next 64 are for 'to' squares
-    print(index)
-    from_square_index = index % 64
-    to_square_index = index // 64
-
-    # Convert square indices to algebraic notation
-    from_square = chess.SQUARE_NAMES[from_square_index]
-    to_square = chess.SQUARE_NAMES[to_square_index]
-
-    # Combine to get the move in UCI format
-    move_uci = from_square + to_square
-
-    # Check if the move is legal
-    print(move_uci)
-    if move_uci in [move.uci() for move in board.legal_moves]:
+    move = chess.Move.from_uci(move_uci)
+    if move in board.legal_moves:
         return move_uci
     else:
-        return None  # or handle illegal moves differently
+        return None
+
 
 def predict_next_move(model, board):
     board_tensor = fen_to_tensor(board.fen())
@@ -42,6 +36,7 @@ def predict_next_move(model, board):
     predicted_move_prob = model.predict([np.array([board_tensor]), np.array([move_sequence_vector])])
     print(predicted_move_prob)
     predicted_move_index = np.argmax(predicted_move_prob[0])
+    print(predicted_move_index)
     predicted_move = index_to_move(predicted_move_index, board)
     return predicted_move
 
