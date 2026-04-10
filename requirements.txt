@@ -1,6 +1,7 @@
-pygame
-chess
-pandas
-io
-re
-chess.pgn
+keras>=3.14.0
+tensorflow>=2.16.0 
+chess>=1.10.0 
+numpy>=1.26.0
+pygame>=2.5.0
+Pillow>=10.0.0
+gradescope-utils>=0.5.0

@@ -50,7 +50,7 @@ def pgn_parse(path_open, path_save):
 
 # Counts the number of times the best move was played in the PGN file
 def read_pgn():
-    pgn = open("c:/Users/vince/Downloads/magnus_evalv2.pgn", "r")
+    pgn = open("c:/Users/Vincent/Downloads/magnus_evalv2.pgn", "r")
     mygame=chess.pgn.read_game(pgn)
     false = 0
     true = 0
@@ -79,4 +79,4 @@ def read_pgn():
     print("True: " + str(true))
     pgn.close()
 if __name__ == '__main__':
-    pgn_parse("c:/Users/vince/Downloads/GM_games_2600_pt2.pgn", "c:/Users/vince/Downloads/GM_games_eval.pgn")
+    pgn_parse("c:/Users/Vincent/Downloads/GM_games_2600_pt2.pgn", "c:/Users/vince/Downloads/GM_games_eval.pgn")
