@@ -1,3 +1,4 @@
+import os
 import math
 import random
 import pygame
@@ -6,6 +7,20 @@ import chess.pgn
 import chess.svg
 import chess.engine
 import heuristics
+
+# ---------------------------------------------------------------------------
+# Stockfish path — edit the default below, or set the environment variable
+# so it works across different computers without changing the code:
+#
+#   Windows:  set STOCKFISH_PATH=C:\path\to\stockfish.exe
+#   Mac/Linux: export STOCKFISH_PATH=/path/to/stockfish
+#
+# Download Stockfish 17 from: https://stockfishchess.org/download/
+# ---------------------------------------------------------------------------
+STOCKFISH_PATH = os.environ.get(
+    'STOCKFISH_PATH',
+    'stockfish.exe'  # default: looks for stockfish.exe in the project root
+)
 
 # This function converts the board format into an array for the evaluate function in mychess.lib.heuristics.
 def evaluate_helper(board):
@@ -24,19 +39,16 @@ def evaluate_helper(board):
     return [white_pieces] + [black_pieces]
 
 def get_best_move(board, time_limit=2):
-    with chess.engine.SimpleEngine.popen_uci("C:/Users/Vincent/Downloads/scid_windows_5.0.2/scid_windows_x64/engines/stockfish.exe") as engine:
+    with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
         result = engine.play(board, chess.engine.Limit(time=time_limit))
-        engine.close()
         return result.move
 
 def random_move_player(board):
     legal_moves = list(board.legal_moves)
     if len(legal_moves) == 0:
-        return None  # If no legal moves available, return None or any other indication of inability to move
+        return None
+    return random.choice(legal_moves)
 
-    random_move = random.choice(legal_moves)
-    return random_move
-    
 def alphabeta(side, board, depth, alpha=-math.inf, beta=math.inf):
     best_move = None
     max_eval = float("-inf") if side else float("inf")
@@ -58,26 +70,26 @@ def alphabeta(side, board, depth, alpha=-math.inf, beta=math.inf):
 
 def alphabetahelper(side, board, depth, alpha=-math.inf, beta=math.inf):
     if depth == 0 or board.is_game_over() or board.is_checkmate():
-      return heuristics.evaluate(evaluate_helper(board))
-    if (side):
-      value = -10000
-      for move in board.legal_moves:
-        board.push(move)
-        v = alphabetahelper(board.turn, board, depth - 1, alpha, beta)
-        board.pop()
-        value = max(value, v)
-        if (value >= beta):
-          break
-        alpha = max(alpha, value)
-      return value
+        return heuristics.evaluate(evaluate_helper(board))
+    if side:
+        value = -10000
+        for move in board.legal_moves:
+            board.push(move)
+            v = alphabetahelper(board.turn, board, depth - 1, alpha, beta)
+            board.pop()
+            value = max(value, v)
+            if value >= beta:
+                break
+            alpha = max(alpha, value)
+        return value
     else:
-      value = 10000
-      for move in board.legal_moves:
-        board.push(move)
-        v = alphabetahelper(board.turn, board, depth - 1, alpha, beta)
-        board.pop()
-        value = min(value, v)
-        if (value <= alpha):
-          break
-        beta = min(beta, value)
-      return value
+        value = 10000
+        for move in board.legal_moves:
+            board.push(move)
+            v = alphabetahelper(board.turn, board, depth - 1, alpha, beta)
+            board.pop()
+            value = min(value, v)
+            if value <= alpha:
+                break
+            beta = min(beta, value)
+        return value
