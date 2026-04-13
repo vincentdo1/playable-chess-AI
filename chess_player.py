@@ -24,7 +24,7 @@ def evaluate_helper(board):
     return [white_pieces] + [black_pieces]
 
 def get_best_move(board, time_limit=2):
-    with chess.engine.SimpleEngine.popen_uci("C:/Users/vince/Downloads/scid_windows_5.0.2/scid_windows_x64/engines/stockfish.exe") as engine:
+    with chess.engine.SimpleEngine.popen_uci("C:/Users/Vincent/Downloads/scid_windows_5.0.2/scid_windows_x64/engines/stockfish.exe") as engine:
         result = engine.play(board, chess.engine.Limit(time=time_limit))
         engine.close()
         return result.move

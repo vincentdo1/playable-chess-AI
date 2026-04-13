@@ -4,6 +4,14 @@ from PIL import Image
 import chess
 import chess_player
 
+# Import the neural network player — only loads the model once at startup
+try:
+    from load_model import load_trained_model, predict_next_move
+    _magnus_model = load_trained_model()
+except Exception as e:
+    _magnus_model = None
+    print(f"Warning: could not load Magnus model ({e}). 'magnus_carlsen' player will fall back to random.")
+
 ################################################################################################
 # Main chess-playing application.
 # Vincent Do, July 2023
@@ -111,6 +119,13 @@ class ChessGame:
             elif self.board.turn and self.white_player == "alphabeta" or not self.board.turn and self.black_player == "alphabeta":
                 ai_move = chess_player.alphabeta(self.board.turn, self.board, 3)
                 self.board.push(ai_move)
+            elif self.board.turn and self.white_player == "magnus_carlsen" or not self.board.turn and self.black_player == "magnus_carlsen":
+                if _magnus_model is not None:
+                    uci = predict_next_move(_magnus_model, self.board)
+                    ai_move = chess.Move.from_uci(uci) if uci else chess_player.random_move_player(self.board)
+                else:
+                    ai_move = chess_player.random_move_player(self.board)
+                self.board.push(ai_move)
 
     # Function to run the game loop
     def run(self):
@@ -138,9 +153,9 @@ def main():
         description     = 'AI Chess Player', 
         formatter_class = argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--white_player', default = 'you',
-                        choices = ('random', 'you', 'engine', 'alphabeta'))
+                        choices = ('random', 'you', 'engine', 'alphabeta', 'magnus_carlsen'))
     parser.add_argument('--black_player', default = 'you',
-                        choices = ('random', 'you', 'engine', 'alphabeta'))
+                        choices = ('random', 'you', 'engine', 'alphabeta', 'magnus_carlsen'))
     args   = parser.parse_args()
     application = ChessGame(args.white_player, args.black_player)
     application.run()

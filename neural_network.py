@@ -1,33 +1,36 @@
 """
-neural_network.py — Chess move prediction model (optimized for training speed).
-
-Workflow:
-  1. Make sure you've run preprocess.py to convert PGN data into .npz chunks.
-  2. Run this file to train:  python neural_network.py
+neural_network.py — Chess move prediction model (PyTorch, GPU-accelerated).
 """
 
 import os
 import glob
-import chess.pgn
-import chess
 import re
-import tensorflow as tf
-import keras
-from keras.layers import Input, Dense, Conv2D, Flatten, LSTM, Dropout
-from keras.models import Model
+import random
 
 import numpy as np
+import chess
+import chess.pgn
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
 
 # ---------------------------------------------------------------------------
-# Config — edit paths to match your setup
+# Config
 # ---------------------------------------------------------------------------
 TRAIN_DIR  = 'data/train_chunks'
 VAL_DIR    = 'data/val_chunks'
-MODEL_PATH = 'data/grandmaster_model_v2.keras'
-BATCH_SIZE = 256    # increase if you have a large GPU; decrease if you run OOM
-EPOCHS     = 50     # EarlyStopping will halt before this if val loss plateaus
+MODEL_PATH = 'data/grandmaster_model_v2.pt'
+BATCH_SIZE = 512
+EPOCHS     = 50
 SEQ_LEN    = 10
+LR         = 1e-3
 # ---------------------------------------------------------------------------
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if __name__ == '__main__':
+    print(f"Using device: {DEVICE}")
+    if DEVICE.type == 'cuda':
+        print(f"  GPU: {torch.cuda.get_device_name(0)}")
 
 piece_to_index = {
     'p': 0, 'n': 1, 'b': 2, 'r': 3, 'q': 4, 'k': 5,
@@ -36,8 +39,20 @@ piece_to_index = {
 }
 
 
-def fen_to_tensor(fen):
-    """Convert a FEN string to an 8x8x16 numpy tensor."""
+# ---------------------------------------------------------------------------
+# Data helpers
+# ---------------------------------------------------------------------------
+
+def fen_to_tensor(fen, flip: bool = False):
+    """
+    Convert a FEN string to an 8x8x16 numpy tensor.
+
+    flip=True rotates the board 180 degrees so it is always seen from
+    the perspective of the side to move. When flip=True (Black's turn),
+    Black's pieces appear at the bottom and White's at the top, exactly
+    mirroring how White positions look when flip=False. This lets the
+    model learn a single set of patterns that apply to both colors.
+    """
     tensor = np.zeros((8, 8, 16), dtype=np.float32)
     parts = fen.split(' ')
     rows = parts[0].split('/')
@@ -51,71 +66,60 @@ def fen_to_tensor(fen):
                 tensor[tensor_row, j, piece_to_index[char]] = 1
                 j += 1
     castling = parts[2]
-    if 'K' in castling:
-        tensor[:, :, piece_to_index['CK']] = 1
-    if 'Q' in castling:
-        tensor[:, :, piece_to_index['CQ']] = 1
-    if 'k' in castling:
-        tensor[:, :, piece_to_index['ck']] = 1
-    if 'q' in castling:
-        tensor[:, :, piece_to_index['cq']] = 1
+    if 'K' in castling: tensor[:, :, piece_to_index['CK']] = 1
+    if 'Q' in castling: tensor[:, :, piece_to_index['CQ']] = 1
+    if 'k' in castling: tensor[:, :, piece_to_index['ck']] = 1
+    if 'q' in castling: tensor[:, :, piece_to_index['cq']] = 1
+
+    if flip:
+        # Rotate board 180 degrees: reverse both rows and columns
+        tensor = tensor[::-1, ::-1, :].copy()
+
     return tensor
 
 
 def square_to_index(square):
-    """Convert an algebraic square name (e.g. 'e4') to a python-chess index (0-63, a1=0)."""
     return chess.parse_square(square.lower()[:2])
 
 
-def move_to_vector(move):
-    """Encode a chess.Move as a 132-dim float vector for use as LSTM input."""
+def flip_square(sq: int) -> int:
+    """Mirror a square index 180 degrees (a1=0 <-> h8=63)."""
+    return 63 - sq
+
+
+def move_to_vector(move, flip: bool = False):
+    """Encode a chess.Move as a 132-dim float vector."""
     vector = np.zeros(132, dtype=np.float32)
-    vector[move.from_square] = 1
-    vector[64 + move.to_square] = 1
+    from_sq = flip_square(move.from_square) if flip else move.from_square
+    to_sq   = flip_square(move.to_square)   if flip else move.to_square
+    vector[from_sq] = 1
+    vector[64 + to_sq] = 1
     if move.promotion is not None:
         promo_map = {chess.KNIGHT: 128, chess.BISHOP: 129,
-                     chess.ROOK: 130, chess.QUEEN: 131}
+                     chess.ROOK: 130,  chess.QUEEN: 131}
         idx = promo_map.get(move.promotion)
         if idx is not None:
             vector[idx] = 1
     return vector
 
 
-def move_sequence_to_vector(move_sequence, max_length=10):
-    """
-    Encode a sequence of chess.Move objects as a (max_length, 132) float matrix.
-    Each row is a move encoded the same way as move_to_vector.
-    """
-    sequence_vector = np.zeros((max_length, 132), dtype=np.float32)
+def move_sequence_to_vector(move_sequence, max_length=10, flip: bool = False):
+    """Encode a list of chess.Move objects as a (max_length, 132) matrix."""
+    seq = np.zeros((max_length, 132), dtype=np.float32)
     for i, move in enumerate(move_sequence[-max_length:]):
-        move_vector = np.zeros(132, dtype=np.float32)
-        move_vector[move.from_square] = 1
-        move_vector[64 + move.to_square] = 1
-        if move.promotion is not None:
-            promo_map = {chess.KNIGHT: 128, chess.BISHOP: 129,
-                         chess.ROOK: 130, chess.QUEEN: 131}
-            idx = promo_map.get(move.promotion)
-            if idx is not None:
-                move_vector[idx] = 1
-        sequence_vector[i] = move_vector
-    return sequence_vector
+        seq[i] = move_to_vector(move, flip=flip)
+    return seq
 
 
 def move_to_index(move, board):
-    """
-    Return (from_square_index, to_square_index) as two separate integers (0-63).
-    Used by preprocess.py to compute target labels.
-    """
+    """Return (from_sq, to_sq) as integers. Flipping is handled by the caller."""
     if move not in board.legal_moves:
         raise ValueError(f"Move {move.uci()} is not legal in this position.")
     return move.from_square, move.to_square
 
 
 def parse_pgn(file_path, sequence_length=10):
-    """
-    Generator over annotated moves in a PGN file.
-    Used by preprocess.py — NOT called during training in the optimized pipeline.
-    """
+    """Generator over annotated moves in a PGN. Used by preprocess.py only."""
     with open(file_path) as pgn_file:
         while True:
             game = chess.pgn.read_game(pgn_file)
@@ -125,231 +129,219 @@ def parse_pgn(file_path, sequence_length=10):
             recent_moves = []
             for node in game.mainline():
                 move = node.move
-                fen = board.fen()
-                board_tensor = fen_to_tensor(fen)
+                is_black = (board.turn == chess.BLACK)
+                board_tensor = fen_to_tensor(board.fen(), flip=is_black)
                 recent_moves.append(move)
                 if len(recent_moves) > sequence_length:
                     recent_moves.pop(0)
-                move_vector = move_to_vector(move)
+                move_vector = move_to_vector(move, flip=is_black)
                 comment = node.comment
-                eval_match          = re.search(r'\[%eval: ([^\]]+)\]', comment)
-                best_move_match     = re.search(r'\[%best_move: ([^\]]+)\]', comment)
-                played_best_move_match = re.search(r'\[%played_best_move: ([^\]]+)\]', comment)
-                evaluation       = eval_match.group(1)          if eval_match          else None
-                best_move        = best_move_match.group(1)     if best_move_match     else None
-                played_best_move = played_best_move_match.group(1) if played_best_move_match else None
+                best_move_match = re.search(r'\[%best_move: ([^\]]+)\]', comment)
+                best_move = best_move_match.group(1) if best_move_match else None
                 if best_move is None:
                     board.push(move)
                     continue
-                from_idx, to_idx = move_to_index(board.parse_uci(best_move), board)
+                bm = board.parse_uci(best_move)
+                from_idx, to_idx = move_to_index(bm, board)
+                # Flip target square indices when it's Black's turn
+                if is_black:
+                    from_idx = flip_square(from_idx)
+                    to_idx   = flip_square(to_idx)
                 yield (board_tensor, recent_moves, move_vector,
-                       evaluation, best_move, played_best_move, (from_idx, to_idx))
+                       None, best_move, None, (from_idx, to_idx))
                 board.push(move)
 
 
 # ---------------------------------------------------------------------------
-# OPTIMIZATION A — tf.data pipeline
+# Dataset
 # ---------------------------------------------------------------------------
 
-def _load_chunk(path: str):
-    """Load one .npz chunk and return its four arrays."""
-    data = np.load(path)
-    return data['boards'], data['moves'], data['from_sq'], data['to_sq']
-
-
-def create_dataset(chunk_dir: str, batch_size: int = BATCH_SIZE,
-                   shuffle: bool = True) -> tf.data.Dataset:
+class ChunkDataset(torch.utils.data.IterableDataset):
     """
-    Build a tf.data.Dataset that streams from pre-saved .npz chunk files.
+    IterableDataset over pre-processed .npz chunk files.
+    Sequential chunk loading — no disk thrashing.
 
-    OPTIMIZATION A: Using tf.data with prefetch overlaps data loading on the
-    CPU with model execution on the GPU. Without this, the GPU sits idle for
-    every batch while the CPU finishes loading the next one.
-
-    OPTIMIZATION E: No PGN parsing — data was already converted by preprocess.py.
-    This eliminates the #1 bottleneck (re-parsing 300MB of PGN per epoch).
+    NOTE: preprocess.py must be re-run after adding the flip fix, because
+    the board tensors and square indices stored in existing chunks were
+    computed without flipping for Black. The chunks need to be regenerated.
     """
-    chunk_paths = sorted(glob.glob(os.path.join(chunk_dir, 'chunk_*.npz')))
-    if not chunk_paths:
-        raise FileNotFoundError(
-            f"No chunk files found in {chunk_dir!r}. "
-            "Run preprocess.py first."
-        )
+    def __init__(self, chunk_dir, shuffle=True):
+        self.chunk_paths = sorted(glob.glob(os.path.join(chunk_dir, 'chunk_*.npz')))
+        if not self.chunk_paths:
+            raise FileNotFoundError(
+                f"No chunk files found in {chunk_dir!r}. Run preprocess.py first."
+            )
+        self.shuffle = shuffle
+        total = sum(len(np.load(p)['boards']) for p in self.chunk_paths)
+        print(f"Found {len(self.chunk_paths)} chunks in {chunk_dir}  ({total:,} positions)")
 
-    def generator():
-        paths = chunk_paths.copy()
-        if shuffle:
-            import random
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        paths = self.chunk_paths.copy()
+        if self.shuffle:
             random.shuffle(paths)
+        if worker_info is not None:
+            paths = paths[worker_info.id::worker_info.num_workers]
+
         for path in paths:
-            boards, moves, from_sq, to_sq = _load_chunk(path)
-            # Shuffle within each chunk
-            if shuffle:
-                idx = np.random.permutation(len(boards))
-                boards, moves, from_sq, to_sq = (
-                    boards[idx], moves[idx], from_sq[idx], to_sq[idx]
-                )
-            for i in range(len(boards)):
-                yield (
-                    {'board_input': boards[i], 'move_input': moves[i]},
-                    {'from_output': from_sq[i], 'to_output': to_sq[i]}
-                )
-
-    output_signature = (
-        {
-            'board_input': tf.TensorSpec(shape=(8, 8, 16), dtype=tf.float32),
-            'move_input':  tf.TensorSpec(shape=(10, 132),  dtype=tf.float32),
-        },
-        {
-            'from_output': tf.TensorSpec(shape=(), dtype=tf.int32),
-            'to_output':   tf.TensorSpec(shape=(), dtype=tf.int32),
-        }
-    )
-
-    ds = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
-    ds = ds.batch(batch_size, drop_remainder=True)
-    ds = ds.prefetch(tf.data.AUTOTUNE)  # overlap CPU loading with GPU training
-    return ds
-
-
-# ---------------------------------------------------------------------------
-# OPTIMIZATION B — Mixed precision
-# ---------------------------------------------------------------------------
-
-def enable_mixed_precision():
-    """
-    OPTIMIZATION B: Mixed precision runs most operations in float16 while
-    keeping a float32 master copy of weights for numerical stability.
-    This gives ~1.5-2x speedup on Nvidia GPUs (Turing/Ampere and newer)
-    with no meaningful loss in model quality.
-
-    If you hit NaN losses after enabling this, disable it — it means your
-    GPU doesn't support it well or your gradients are unstable.
-    """
-    mixed_precision.set_global_policy('mixed_float16')
-    print("Mixed precision enabled (float16 compute, float32 weights).")
+            data    = np.load(path)
+            boards  = data['boards']
+            moves   = data['moves']
+            from_sq = data['from_sq']
+            to_sq   = data['to_sq']
+            indices = np.random.permutation(len(boards)) if self.shuffle else np.arange(len(boards))
+            for i in indices:
+                board = torch.tensor(boards[i],  dtype=torch.float32).permute(2, 0, 1)
+                move  = torch.tensor(moves[i],   dtype=torch.float32)
+                f_sq  = torch.tensor(from_sq[i], dtype=torch.long)
+                t_sq  = torch.tensor(to_sq[i],   dtype=torch.long)
+                yield board, move, f_sq, t_sq
 
 
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
 
-def create_chess_model():
+class ChessModel(nn.Module):
     """
-    Build the chess move prediction model with two output heads.
+    CNN + LSTM chess move prediction model with two output heads.
 
-    Architecture is unchanged from the bug-fixed version. The two 64-class
-    softmax heads (from_output, to_output) trained with sparse_categorical_
-    crossentropy are the correct formulation for move prediction.
-
-    OPTIMIZATION B: mixed precision is enabled globally before calling this,
-    so the model automatically uses float16 compute where beneficial.
+    Dropout removed per ConvChess paper finding: chess boards are small
+    and sparse, so all features are interdependent. Dropout destroys
+    crucial piece relationship signals and consistently hurts accuracy.
     """
-    board_input = Input(shape=(8, 8, 16), name='board_input')
-    x = Conv2D(64, kernel_size=(3, 3), activation='relu')(board_input)
-    x = Conv2D(64, kernel_size=(3, 3), activation='relu')(x)
-    x = Flatten()(x)
+    def __init__(self):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv2d(16, 64, kernel_size=3),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+        self.lstm = nn.LSTM(input_size=132, hidden_size=64, batch_first=True)
+        self.fc = nn.Sequential(
+            nn.Linear(1088, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),  # Dropout removed — hurts chess CNN performance
+            nn.ReLU(),
+        )
+        self.from_head = nn.Linear(128, 64)
+        self.to_head   = nn.Linear(128, 64)
 
-    move_input = Input(shape=(10, 132), name='move_input')
-    y = LSTM(64)(move_input)
-
-    combined = tf.keras.layers.concatenate([x, y])
-    z = Dense(256, activation='relu')(combined)
-    z = Dropout(0.5)(z)
-    z = Dense(128, activation='relu')(z)
-
-    # Cast back to float32 before softmax — required when using mixed precision,
-    # because float16 softmax can produce inf/NaN near the output boundaries.
-    from_logits = Dense(64, name='from_logits')(z)
-    to_logits   = Dense(64, name='to_logits')(z)
-    from_output = tf.keras.layers.Activation('softmax', dtype='float32', name='from_output')(from_logits)
-    to_output   = tf.keras.layers.Activation('softmax', dtype='float32', name='to_output')(to_logits)
-
-    model = Model(inputs=[board_input, move_input], outputs=[from_output, to_output])
-
-    # OPTIMIZATION C: larger batch size (set via BATCH_SIZE constant) and a
-    # slightly higher initial learning rate to compensate — large batches need
-    # a proportionally larger lr to converge at the same rate.
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
-
-    model.compile(
-        optimizer=optimizer,
-        loss={
-            'from_output': 'sparse_categorical_crossentropy',
-            'to_output':   'sparse_categorical_crossentropy',
-        },
-        metrics={
-            'from_output': 'accuracy',
-            'to_output':   'accuracy',
-        }
-    )
-    return model
+    def forward(self, board, moves):
+        cnn_out = self.cnn(board)
+        _, (hidden, _) = self.lstm(moves)
+        lstm_out = hidden.squeeze(0)
+        combined = torch.cat([cnn_out, lstm_out], dim=1)
+        z = self.fc(combined)
+        return self.from_head(z), self.to_head(z)
 
 
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
-def build_callbacks(model_path: str = MODEL_PATH):
-    """
-    OPTIMIZATION D — training callbacks.
+def train_one_epoch(model, loader, optimizer, scaler, criterion, device):
+    model.train()
+    total_loss = from_correct = to_correct = total = 0
+    for boards, moves, from_sq, to_sq in loader:
+        boards  = boards.to(device)
+        moves   = moves.to(device)
+        from_sq = from_sq.to(device)
+        to_sq   = to_sq.to(device)
+        optimizer.zero_grad()
+        with torch.amp.autocast('cuda'):
+            from_logits, to_logits = model(boards, moves)
+            loss = criterion(from_logits, from_sq) + criterion(to_logits, to_sq)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        n = boards.size(0)
+        total_loss   += loss.item() * n
+        from_correct += (from_logits.argmax(1) == from_sq).sum().item()
+        to_correct   += (to_logits.argmax(1)   == to_sq).sum().item()
+        total        += n
+    return total_loss / total, from_correct / total, to_correct / total
 
-    ModelCheckpoint   : saves the model only when val loss improves.
-                        You always keep the best version, not just the last.
-    EarlyStopping     : stops training if val loss hasn't improved for 5
-                        epochs, saving time and preventing overfitting.
-    ReduceLROnPlateau : halves the learning rate when val loss stalls for
-                        3 epochs, helping the model escape plateaus without
-                        requiring you to manually tune the schedule.
-    """
-    return [
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath        = model_path,
-            monitor         = 'val_loss',
-            save_best_only  = True,
-            verbose         = 1,
-        ),
-        tf.keras.callbacks.EarlyStopping(
-            monitor              = 'val_loss',
-            patience             = 5,
-            restore_best_weights = True,
-            verbose              = 1,
-        ),
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor  = 'val_loss',
-            factor   = 0.5,
-            patience = 3,
-            min_lr   = 1e-6,
-            verbose  = 1,
-        ),
-    ]
+
+@torch.no_grad()
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    total_loss = from_correct = to_correct = total = 0
+    for boards, moves, from_sq, to_sq in loader:
+        boards  = boards.to(device)
+        moves   = moves.to(device)
+        from_sq = from_sq.to(device)
+        to_sq   = to_sq.to(device)
+        with torch.amp.autocast('cuda'):
+            from_logits, to_logits = model(boards, moves)
+            loss = criterion(from_logits, from_sq) + criterion(to_logits, to_sq)
+        n = boards.size(0)
+        total_loss   += loss.item() * n
+        from_correct += (from_logits.argmax(1) == from_sq).sum().item()
+        to_correct   += (to_logits.argmax(1)   == to_sq).sum().item()
+        total        += n
+    return total_loss / total, from_correct / total, to_correct / total
 
 
 def main():
-    # OPTIMIZATION B: enable before building the model
-    enable_mixed_precision()
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
 
-    model = create_chess_model()
-    model.summary()
+    print("Loading training dataset...")
+    train_ds = ChunkDataset(TRAIN_DIR, shuffle=True)
+    print("Loading validation dataset...")
+    val_ds   = ChunkDataset(VAL_DIR,   shuffle=False)
 
-    print(f"\nLoading training data from   : {TRAIN_DIR}/")
-    print(f"Loading validation data from : {VAL_DIR}/")
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE,
+                              num_workers=4, pin_memory=True,
+                              persistent_workers=True)
+    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE,
+                              num_workers=2, pin_memory=True,
+                              persistent_workers=True)
+
+    model     = ChessModel().to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    criterion = nn.CrossEntropyLoss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3
+    )
+    scaler = torch.amp.GradScaler('cuda')
+
+    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Batch size : {BATCH_SIZE}  |  Max epochs : {EPOCHS}\n")
 
-    # OPTIMIZATION A + E: tf.data pipeline over pre-processed chunks
-    train_ds = create_dataset(TRAIN_DIR, batch_size=BATCH_SIZE, shuffle=True)
-    val_ds   = create_dataset(VAL_DIR,   batch_size=BATCH_SIZE, shuffle=False)
+    best_val_loss       = float('inf')
+    patience_count      = 0
+    EARLY_STOP_PATIENCE = 5
 
-    # OPTIMIZATION D: model.fit() is more optimized than a manual train_on_batch
-    # loop and integrates cleanly with callbacks and tf.data
-    model.fit(
-        train_ds,
-        validation_data = val_ds,
-        epochs          = EPOCHS,
-        callbacks       = build_callbacks(),
-    )
+    for epoch in range(1, EPOCHS + 1):
+        print(f"Epoch {epoch}/{EPOCHS}")
+        tr_loss, tr_from, tr_to = train_one_epoch(
+            model, train_loader, optimizer, scaler, criterion, DEVICE)
+        vl_loss, vl_from, vl_to = evaluate(
+            model, val_loader, criterion, DEVICE)
+        print(f"  train  loss={tr_loss:.4f}  from_acc={tr_from:.4f}  to_acc={tr_to:.4f}")
+        print(f"  val    loss={vl_loss:.4f}  from_acc={vl_from:.4f}  to_acc={vl_to:.4f}")
+        scheduler.step(vl_loss)
+        if vl_loss < best_val_loss:
+            best_val_loss  = vl_loss
+            patience_count = 0
+            torch.save({
+                'epoch':                epoch,
+                'model_state_dict':     model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss':             best_val_loss,
+            }, MODEL_PATH)
+            print(f"  Saved best model (val_loss={best_val_loss:.4f})")
+        else:
+            patience_count += 1
+            print(f"  No improvement ({patience_count}/{EARLY_STOP_PATIENCE})")
+            if patience_count >= EARLY_STOP_PATIENCE:
+                print(f"\nEarly stopping at epoch {epoch}.")
+                break
 
-    print("\nTraining complete. Best model saved to:", MODEL_PATH)
+    print(f"\nTraining complete. Best model saved to: {MODEL_PATH}")
 
 
 if __name__ == '__main__':

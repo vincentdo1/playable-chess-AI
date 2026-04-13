@@ -16,7 +16,7 @@ import numpy as np
 import chess
 import chess.pgn
 
-from neural_network import fen_to_tensor, move_to_index, move_sequence_to_vector
+from neural_network import fen_to_tensor, move_to_index, move_sequence_to_vector, flip_square
 
 # ---------------------------------------------------------------------------
 # Config — edit paths to match your setup
@@ -133,7 +133,8 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
                 best_move_match = re.search(r'\[%best_move: ([^\]]+)\]', comment)
                 best_move = best_move_match.group(1) if best_move_match else None
 
-                board_tensor = fen_to_tensor(board.fen())
+                is_black = (board.turn == chess.BLACK)
+                board_tensor = fen_to_tensor(board.fen(), flip=is_black)
 
                 recent_moves.append(move)
                 if len(recent_moves) > sequence_length:
@@ -142,7 +143,10 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
                 if best_move is not None:
                     try:
                         from_idx, to_idx = move_to_index(board.parse_uci(best_move), board)
-                        move_seq = move_sequence_to_vector(recent_moves,
+                        if is_black:
+                            from_idx = flip_square(from_idx)
+                            to_idx   = flip_square(to_idx)
+                        move_seq = move_sequence_to_vector(recent_moves, flip=is_black,
                                                            max_length=sequence_length)
                         boards_buf.append(board_tensor)
                         moves_buf.append(move_seq)

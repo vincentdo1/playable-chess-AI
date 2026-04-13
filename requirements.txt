@@ -1,7 +1,21 @@
-keras>=3.14.0
-tensorflow>=2.16.0 
-chess>=1.10.0 
+# Chess AI — Python dependencies
+# Install with:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements.txt
+
+# Deep learning (install torch separately via the command above first)
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Chess
+chess>=1.10.0
+
+# Data & numerics
 numpy>=1.26.0
+
+# Chess UI (main.py)
 pygame>=2.5.0
 Pillow>=10.0.0
+
+# Testing (grade.py)
 gradescope-utils>=0.5.0

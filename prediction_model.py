@@ -1,31 +1,21 @@
-import numpy as np
-import chess
-from neural_network import fen_to_tensor
+"""
+prediction_model.py — DEPRECATED.
 
-def index_to_move(index, board):
-    """
-    Converts a predicted move index back to a standard chess move in UCI format.
+This file's functionality has been replaced by load_model.py, which uses
+the trained PyTorch model to predict moves.
 
-    :param index: The index of the predicted move in the output vector.
-    :param board: The current board state as a chess.Board object.
-    :return: The move in UCI format (e.g., 'e2e4').
-    """
+Use predict_next_move() from load_model.py instead:
 
-    # Assuming the first 64 indices are for 'from' squares and the next 64 are for 'to' squares
-    print(index)
-    from_square_index = index % 64
-    to_square_index = index // 64
+    from load_model import load_trained_model, predict_next_move
+    import chess
 
-    # Convert square indices to algebraic notation
-    from_square = chess.SQUARE_NAMES[from_square_index]
-    to_square = chess.SQUARE_NAMES[to_square_index]
+    model = load_trained_model()
+    board = chess.Board()
+    move  = predict_next_move(model, board)
+    print(move)  # e.g. 'e2e4'
+"""
 
-    # Combine to get the move in UCI format
-    move_uci = from_square + to_square
-
-    # Check if the move is legal
-    print(move_uci)
-    if move_uci in [move.uci() for move in board.legal_moves]:
-        return move_uci
-    else:
-        return None  # or handle illegal moves differently
+raise ImportError(
+    "prediction_model.py is deprecated. Use load_model.py instead.\n"
+    "See the docstring in this file for usage."
+)
