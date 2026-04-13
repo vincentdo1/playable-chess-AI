@@ -656,7 +656,7 @@ function setConn(ok) {
 // ─── Stockfish worker ─────────────────────────────────────────────────────────
 function initStockfish() {
   if (sfEngine) sfEngine.terminate();
-  sfEngine = new Worker('https://unpkg.com/stockfish.js@10.0.2/stockfish.js');
+  sfEngine = new Worker('/playable-chess-AI/stockfish.js');
   sfEngine.onmessage = function(e) {
     if (typeof e.data !== 'string') return;
     if (e.data.startsWith('bestmove')) {
@@ -676,12 +676,11 @@ function initBoard() {
     draggable: true,
     position: 'start',
     pieceTheme: function(piece) {
-        var color = piece[0];  // 'w' or 'b'
-        var type  = piece[1];  // 'P', 'R', 'N', 'B', 'Q', 'K'
-        var symbol = color === 'w' ? type.toUpperCase() : type.toLowerCase();
-        var suffix = color === 'w' ? '_w' : '_b';
-        return 'pieces/' + symbol + suffix + '.png';
-    },
+      var color  = piece[0];  // 'w' or 'b'
+      var type   = piece[1];  // 'P', 'R', 'N', 'B', 'Q', 'K'
+      var suffix = color === 'w' ? '_w' : '_b';
+      return '/playable-chess-AI/pieces/' + type + suffix + '.png';
+  },
 
     onDragStart:       onDragStart,
     onDrop:            onDrop,
