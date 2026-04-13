@@ -1,7 +1,3 @@
-var API_URL = window.location.hostname === 'localhost'
-  ? 'http://localhost:5000'
-  : 'https://your-app.up.railway.app';
-  
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -619,7 +615,9 @@ input[type=range] {
 // ─── Configuration ────────────────────────────────────────────────────────────
 // After deploying app.py to Railway, replace this with your Railway URL.
 // Example: 'https://chess-ai-production.up.railway.app'
-var API_URL = 'http://localhost:5000';
+var API_URL = window.location.hostname === 'localhost'
+  ? 'http://localhost:5000'
+  : 'https://your-app.up.railway.app';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 var chess        = new Chess();
@@ -677,7 +675,7 @@ function initBoard() {
   board = Chessboard('board', {
     draggable: true,
     position: 'start',
-    pieceTheme: 'https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/img/chesspieces/wikipedia/{piece}.png',
+    pieceTheme: 'https://cdn.jsdelivr.net/npm/@chrisoakman/chessboardjs@1.0.0/img/chesspieces/wikipedia/{piece}.png',
     onDragStart:       onDragStart,
     onDrop:            onDrop,
     onSnapEnd:         function() { board.position(chess.fen()); },
