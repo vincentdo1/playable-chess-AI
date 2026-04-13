@@ -617,7 +617,7 @@ input[type=range] {
 // Example: 'https://chess-ai-production.up.railway.app'
 var API_URL = window.location.hostname === 'localhost'
   ? 'http://localhost:5000'
-  : 'https://your-app.up.railway.app';
+  : 'https://chess-ai-production-production.up.railway.app';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 var chess        = new Chess();
@@ -676,6 +676,7 @@ function initBoard() {
     draggable: true,
     position: 'start',
     pieceTheme: 'https://cdn.jsdelivr.net/npm/@chrisoakman/chessboardjs@1.0.0/img/chesspieces/wikipedia/{piece}.png',
+
     onDragStart:       onDragStart,
     onDrop:            onDrop,
     onSnapEnd:         function() { board.position(chess.fen()); },
