@@ -675,7 +675,13 @@ function initBoard() {
   board = Chessboard('board', {
     draggable: true,
     position: 'start',
-    pieceTheme: 'https://cdn.jsdelivr.net/npm/@chrisoakman/chessboardjs@1.0.0/img/chesspieces/wikipedia/{piece}.png',
+    pieceTheme: function(piece) {
+        var color = piece[0];  // 'w' or 'b'
+        var type  = piece[1];  // 'P', 'R', 'N', 'B', 'Q', 'K'
+        var symbol = color === 'w' ? type.toUpperCase() : type.toLowerCase();
+        var suffix = color === 'w' ? '_w' : '_b';
+        return 'pieces/' + symbol + suffix + '.png';
+    },
 
     onDragStart:       onDragStart,
     onDrop:            onDrop,
