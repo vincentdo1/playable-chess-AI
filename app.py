@@ -5,18 +5,7 @@ Exposes two Python-based AI players via HTTP:
   - Alphabeta pruning  (chess_player.py)
   - Magnus Carlsen NN  (load_model.py + PyTorch)
 
-Stockfish and Random run client-side in JS — no API call needed.
-
-Deploy to Railway (free):
-  1. Push this repo to GitHub
-  2. Go to railway.app → New Project → Deploy from GitHub repo
-  3. Railway auto-detects Python and runs this file
-  4. Paste the generated URL into index.html as API_URL
-
-Local development:
-  pip install flask flask-cors
-  python app.py
-  Server starts at http://localhost:5000
+Stockfish and Random run client-side in JS — no API call needed since they don't require server computation.
 """
 
 from flask import Flask, request, jsonify
