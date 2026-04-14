@@ -37,7 +37,7 @@ class ChessGame:
         self._predict_fn   = None
         if white_player == "magnus_carlsen" or black_player == "magnus_carlsen":
             try:
-                from load_model import load_trained_model, predict_next_move
+                from load_model import load_trained_model, predict_next_move_with_search as predict_next_move
                 self._magnus_model = load_trained_model()
                 self._predict_fn   = predict_next_move
             except Exception as e:

@@ -1,7 +1,7 @@
-# Lightweight requirements for Railway deployment.
-# Only what app.py actually needs to run Flask + alphabeta.
-# PyTorch (for Magnus) is excluded — too large for Railway free tier.
-# Magnus will show as unavailable in the UI until a GPU server is used.
+# Railway server requirements
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.0+cpu
+torchvision==0.17.0+cpu
 
 flask>=3.0.0
 flask-cors>=4.0.0

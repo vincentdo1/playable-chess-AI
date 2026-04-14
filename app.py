@@ -5,7 +5,7 @@ Exposes two Python-based AI players via HTTP:
   - Alphabeta pruning  (chess_player.py)
   - Magnus Carlsen NN  (load_model.py + PyTorch)
 
-Stockfish and Random run client-side in JS — no API call needed since they don't require server computation.
+Stockfish and Random run client-side in JS — no API call needed.
 """
 
 from flask import Flask, request, jsonify
@@ -24,7 +24,7 @@ _magnus_model = None
 _predict_fn   = None
 
 try:
-    from load_model import load_trained_model, predict_next_move
+    from load_model import load_trained_model, predict_next_move_with_search as predict_next_move
     _magnus_model = load_trained_model()
     _predict_fn   = predict_next_move
     print("Magnus Carlsen model loaded.")

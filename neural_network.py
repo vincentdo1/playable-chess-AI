@@ -19,7 +19,8 @@ from torch.utils.data import DataLoader
 # ---------------------------------------------------------------------------
 TRAIN_DIR  = 'data/train_chunks'
 VAL_DIR    = 'data/val_chunks'
-MODEL_PATH = 'data/grandmaster_model_v2.pt'
+#MODEL_PATH = 'data/grandmaster_model_v2.pt'
+MODEL_PATH = 'model/grandmaster_model_v2.pt'
 BATCH_SIZE = 512
 EPOCHS     = 50
 SEQ_LEN    = 10
