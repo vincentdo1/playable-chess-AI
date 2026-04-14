@@ -1,21 +1,9 @@
-# Chess AI — Python dependencies
-# Install with:
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-#   pip install -r requirements.txt
+# Lightweight requirements for Railway deployment.
+# Only what app.py actually needs to run Flask + alphabeta.
+# PyTorch (for Magnus) is excluded — too large for Railway free tier.
+# Magnus will show as unavailable in the UI until a GPU server is used.
 
-# Deep learning (install torch separately via the command above first)
-torch>=2.2.0
-torchvision>=0.17.0
-
-# Chess
+flask>=3.0.0
+flask-cors>=4.0.0
 chess>=1.10.0
-
-# Data & numerics
 numpy>=1.26.0
-
-# Chess UI (main.py)
-pygame>=2.5.0
-Pillow>=10.0.0
-
-# Testing (grade.py)
-gradescope-utils>=0.5.0

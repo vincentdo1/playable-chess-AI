@@ -1,0 +1,28 @@
+# Chess AI — Python dependencies
+#
+# Install PyTorch first (GPU version):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+# Then install everything else:
+#   pip install -r requirements.txt
+
+# Deep learning
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Chess
+chess>=1.10.0
+
+# Data & numerics
+numpy>=1.26.0
+
+# Web backend (for GitHub Pages API)
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Chess UI (main.py desktop app)
+pygame>=2.5.0
+Pillow>=10.0.0
+
+# Testing
+gradescope-utils>=0.5.0

@@ -1,10 +1,7 @@
 import os
 import math
 import random
-import pygame
 import chess
-import chess.pgn
-import chess.svg
 import chess.engine
 import heuristics
 
