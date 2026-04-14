@@ -655,19 +655,23 @@ function setConn(ok) {
 
 // ─── Stockfish worker ─────────────────────────────────────────────────────────
 function initStockfish() {
-  if (sfEngine) sfEngine.terminate();
-  sfEngine = new Worker('/playable-chess-AI/stockfish.js');
-  sfEngine.onmessage = function(e) {
-    if (typeof e.data !== 'string') return;
-    if (e.data.startsWith('bestmove')) {
-      var uci = e.data.split(' ')[1];
-      if (uci && uci !== '(none)') commitUci(uci);
-      else setThinking(false);
-    }
-  };
-  sfEngine.postMessage('uci');
-  sfEngine.postMessage('setoption name Skill Level value ' + $('#skill-sl').val());
-  sfEngine.postMessage('isready');
+    if (sfEngine) sfEngine.terminate();
+    var sfPath = (window.location.hostname === 'localhost' || 
+                  window.location.hostname === '127.0.0.1')
+                  ? '/stockfish.js'
+                  : '/playable-chess-AI/stockfish.js';
+    sfEngine = new Worker(sfPath);
+    sfEngine.onmessage = function(e) {
+        if (typeof e.data !== 'string') return;
+        if (e.data.startsWith('bestmove')) {
+            var uci = e.data.split(' ')[1];
+            if (uci && uci !== '(none)') commitUci(uci);
+            else setThinking(false);
+        }
+    };
+    sfEngine.postMessage('uci');
+    sfEngine.postMessage('setoption name Skill Level value ' + $('#skill-sl').val());
+    sfEngine.postMessage('isready');
 }
 
 // ─── Board ────────────────────────────────────────────────────────────────────
@@ -676,11 +680,14 @@ function initBoard() {
     draggable: true,
     position: 'start',
     pieceTheme: function(piece) {
-      var color  = piece[0];  // 'w' or 'b'
-      var type   = piece[1];  // 'P', 'R', 'N', 'B', 'Q', 'K'
-      var suffix = color === 'w' ? '_w' : '_b';
-      return '/playable-chess-AI/pieces/' + type + suffix + '.png';
-  },
+        var color  = piece[0];
+        var type   = piece[1];
+        var suffix = color === 'w' ? '_w' : '_b';
+        var base   = window.location.hostname === 'localhost' || 
+                    window.location.hostname === '127.0.0.1'
+                    ? '' : '/playable-chess-AI';
+        return base + '/pieces/' + type + suffix + '.png';
+    },
 
     onDragStart:       onDragStart,
     onDrop:            onDrop,
@@ -736,12 +743,6 @@ function clearLastMove() {
   if (lastTo)   $('.square-' + lastTo).removeClass('highlight-last');
 }
 
-function applyLastMove() {
-  clearLastMove();
-  if (lastFrom) $('.square-' + lastFrom).addClass('highlight-last');
-  if (lastTo)   $('.square-' + lastTo).addClass('highlight-last');
-}
-
 function applyCheck() {
   $('.highlight-check').removeClass('highlight-check');
   if (!chess.in_check()) return;
@@ -767,13 +768,13 @@ function commitUci(uci) {
 }
 
 function afterMove() {
-  applyLastMove();
-  applyCheck();
-  updateStatus();
-  updateHistory();
-  setThinking(false);
-  if (chess.game_over()) { showGameOver(); return; }
-  setTimeout(triggerAI, 280);
+    clearLastMove();
+    applyCheck();
+    updateStatus();
+    updateHistory();
+    setThinking(false);
+    if (chess.game_over()) { showGameOver(); return; }
+    setTimeout(triggerAI, 280);
 }
 
 function triggerAI() {
@@ -938,8 +939,10 @@ $('#white-sel, #black-sel').on('change', syncSliders);
 
 $('#depth-sl').on('input', function() { document.getElementById('depth-val').textContent = this.value; });
 $('#skill-sl').on('input', function() {
-  document.getElementById('skill-val').textContent = this.value;
-  if (sfEngine) sfEngine.postMessage('setoption name Skill Level value ' + this.value);
+    document.getElementById('skill-val').textContent = this.value;
+});
+$('#skill-sl').on('change', function() {
+    if (sfEngine) sfEngine.postMessage('setoption name Skill Level value ' + this.value);
 });
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
