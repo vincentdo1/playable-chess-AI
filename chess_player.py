@@ -63,13 +63,8 @@ def alphabeta(side, board, depth=None, alpha=-math.inf, beta=math.inf):
     return best_move
 
 def alphabetahelper(side, board, depth, alpha, beta):
-    if board.is_checkmate():
-        return -10000 + depth
-    
-    if board.is_stalemate() or board.is_insufficient_material():
-        return 0  # draw is neutral
-    
-    if depth == 0:
+    if depth == 0 or board.is_game_over() or board.is_checkmate():
+        # Pass the chess.Board to evaluate() so endgame features activate
         return heuristics.evaluate(evaluate_helper(board), board)
 
     if side:

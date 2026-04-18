@@ -3,8 +3,7 @@ load_model.py — Load a trained ChessModel and predict the next move.
 
 Two prediction modes:
   predict_next_move            — pure neural network (fast, Magnus-style)
-  predict_next_move_with_search — NN candidates + alphabeta search (stronger,
-                                   especially in middlegame and endgame)
+  predict_next_move_with_search — NN candidates + alphabeta search (to improve model strength)
 """
 
 import math
@@ -163,10 +162,9 @@ def _evaluate_board(board: chess.Board) -> float:
     Positive = good for the side to move, negative = bad.
     Wraps chess_player.evaluate_helper + heuristics.evaluate.
     """
-    raw = heuristics.evaluate(chess_player.evaluate_helper(board))
     # evaluate() returns score from White's perspective —
     # flip sign if it's Black's turn so it's always "higher = better for me"
-    return raw if board.turn == chess.WHITE else -raw
+    return heuristics.evaluate(chess_player.evaluate_helper(board), board)
 
 
 
@@ -178,16 +176,17 @@ def _alphabeta_search(board: chess.Board, depth: int,
     predict_next_move_with_search.
     """
     if board.is_checkmate():
-        return -10000 + depth  # mated — shorter mate scores higher
-
+        return -10000 + depth
+    if board.is_repetition(2):
+        raw = _evaluate_board(board)
+        return -50 if raw > 0 else 50
     if board.is_stalemate() or board.is_insufficient_material():
         return 0
-
     if depth == 0:
         return _evaluate_board(board)
 
     best = float('-inf')
-    for move in board.legal_moves:
+    for move in chess_player._order_moves(board):
         board.push(move)
         score = -_alphabeta_search(board, depth - 1, -beta, -alpha)
         board.pop()
