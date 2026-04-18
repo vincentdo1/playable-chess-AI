@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chess AI — Vincent Do</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #070C18;
+  --surface:  #0D1525;
+  --card:     #111D30;
+  --elevated: #172540;
+  --hover:    #1E3050;
+  --border:       rgba(255,255,255,0.055);
+  --border-gold:  rgba(201,164,60,0.22);
+  --border-hover: rgba(255,255,255,0.12);
+
+  --gold:     #C9A43C;
+  --gold-lt:  #E2C060;
+  --gold-dim: rgba(201,164,60,0.13);
+  --gold-glow: rgba(201,164,60,0.08);
+
+  --text-0: #EDE5D0;
+  --text-1: #8A8070;
+  --text-2: #4A4438;
+
+  --board-l: #F0D9B5;
+  --board-d: #B58863;
+
+  --hl-move:  rgba(235,195,60,0.38);
+  --hl-legal: rgba(46,180,110,0.38);
+  --hl-check: rgba(210,50,50,0.52);
+
+  --success: #2E9E6A;
+  --danger:  #C44040;
+  --info:    #4A90D9;
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 18px;
+}
+
+html { font-size: 16px; scroll-behavior: smooth; }
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text-0);
+  min-height: 100vh;
+  overflow-x: hidden;
+  line-height: 1.5;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 60% 50% at 10% 70%, rgba(201,164,60,0.045) 0%, transparent 100%),
+    radial-gradient(ellipse 50% 40% at 90% 15%, rgba(74,144,217,0.045) 0%, transparent 100%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.page {
+  position: relative;
+  z-index: 1;
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 2.25rem 1.5rem 3rem;
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding-bottom: 1.5rem;
+  margin-bottom: 1.75rem;
+  border-bottom: 0.5px solid var(--border-gold);
+}
+
+.header-left h1 {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 2.6rem;
+  font-weight: 300;
+  letter-spacing: 0.015em;
+  line-height: 1;
+  color: var(--text-0);
+}
+
+.header-left h1 em {
+  font-style: italic;
+  color: var(--gold);
+}
+
+.header-left .byline {
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-1);
+  margin-top: 6px;
+}
+
+.conn-badge {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--text-1);
+  padding: 5px 12px;
+  border: 0.5px solid var(--border);
+  border-radius: 99px;
+  transition: all 0.3s;
+  white-space: nowrap;
+}
+
+.conn-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--text-2);
+  transition: background 0.4s, box-shadow 0.4s;
+}
+
+.conn-badge.online  { color: var(--text-0); border-color: rgba(46,158,106,0.28); }
+.conn-badge.online  .conn-dot { background: var(--success); box-shadow: 0 0 7px var(--success); }
+.conn-badge.offline { color: var(--text-1); border-color: rgba(196,64,64,0.25); }
+.conn-badge.offline .conn-dot { background: var(--danger); }
+
+/* ── Main grid ───────────────────────────────────────────────────────────── */
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr 292px;
+  gap: 22px;
+  align-items: start;
+}
+
+@media (max-width: 700px) {
+  .main-grid { grid-template-columns: 1fr; }
+  .panel { order: -1; }
+  header { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .header-left h1 { font-size: 2rem; }
+}
+
+/* ── Board area ──────────────────────────────────────────────────────────── */
+.board-wrap { position: relative; }
+
+.board-frame {
+  position: relative;
+  background: var(--card);
+  border: 0.5px solid var(--border-gold);
+  border-radius: var(--r-lg);
+  padding: 1.125rem;
+  box-shadow:
+    0 0 0 1px rgba(201,164,60,0.04),
+    0 0 50px var(--gold-glow),
+    0 24px 64px rgba(0,0,0,0.55);
+  transition: box-shadow 0.5s, border-color 0.5s;
+  overflow: hidden;
+}
+
+.board-frame.thinking {
+  border-color: rgba(201,164,60,0.45);
+  box-shadow:
+    0 0 0 1px rgba(201,164,60,0.1),
+    0 0 70px rgba(201,164,60,0.14),
+    0 24px 64px rgba(0,0,0,0.55);
+}
+
+#board { width: 100%; }
+
+.board-b72b1 { border-radius: var(--r-sm) !important; overflow: hidden; }
+
+.square-55d63 { position: relative; }
+.highlight-last  { background: var(--hl-move)  !important; }
+.highlight-legal { background: var(--hl-legal) !important; }
+.highlight-check { background: var(--hl-check) !important; }
+
+.square-55d63.highlight-legal::after {
+  content: '';
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%,-50%);
+  width: 30%; aspect-ratio: 1;
+  background: rgba(30,190,110,0.75);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.board-controls {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 11px;
+}
+
+.ghost-btn {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-1);
+  background: transparent;
+  border: 0.5px solid var(--border);
+  border-radius: 99px;
+  padding: 5px 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.ghost-btn:hover { color: var(--text-0); border-color: var(--border-hover); }
+
+/* Thinking overlay */
+.board-overlay {
+  display: none;
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-lg);
+  background: rgba(7,12,24,0.68);
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 13px;
+  z-index: 10;
+  backdrop-filter: blur(3px);
+}
+.board-overlay.active { display: flex; animation: fadeIn 0.25s ease; }
+
+.spin-ring {
+  width: 46px; height: 46px;
+  border: 2px solid var(--gold-dim);
+  border-top-color: var(--gold);
+  border-radius: 50%;
+  animation: spin 0.85s linear infinite;
+}
+
+.thinking-lbl {
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+/* Game over overlay */
+.go-overlay {
+  display: none;
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-lg);
+  background: rgba(7,12,24,0.84);
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+  backdrop-filter: blur(5px);
+}
+.go-overlay.active { display: flex; animation: fadeIn 0.4s ease; }
+
+.go-card { text-align: center; padding: 2rem; }
+
+.go-result {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 3rem;
+  font-weight: 300;
+  font-style: italic;
+  color: var(--gold);
+  line-height: 1;
+  margin-bottom: 6px;
+}
+
+.go-detail {
+  font-size: 0.825rem;
+  color: var(--text-1);
+  letter-spacing: 0.06em;
+  margin-bottom: 1.5rem;
+}
+
+/* ── Panel ───────────────────────────────────────────────────────────────── */
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.card {
+  background: var(--card);
+  border: 0.5px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 1rem 1.125rem;
+}
+
+.card-label {
+  font-size: 0.67rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  margin-bottom: 0.875rem;
+}
+
+/* Players */
+.player-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 7px;
+}
+
+.piece-glyph {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+.piece-glyph.w { background: var(--board-l); box-shadow: 0 0 0 1.5px rgba(0,0,0,0.25); }
+.piece-glyph.b { background: #1a120a;         box-shadow: 0 0 0 1.5px rgba(255,255,255,0.08); }
+
+.player-label { font-size: 0.75rem; color: var(--text-1); min-width: 36px; }
+
+select {
+  flex: 1;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.8rem;
+  padding: 6px 28px 6px 9px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--elevated);
+  color: var(--text-0);
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='5'%3E%3Cpath d='M0 0l4.5 5L9 0z' fill='%238A8070'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+select:focus { outline: none; border-color: var(--gold); background-color: var(--hover); }
+select option { background: var(--card); color: var(--text-0); }
+
+.vs-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 5px 0 6px;
+  font-size: 0.65rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.vs-strip::before, .vs-strip::after {
+  content: ''; flex: 1;
+  height: 0.5px;
+  background: var(--border);
+}
+
+/* Sliders */
+.slider-group { margin-top: 10px; }
+
+.slider-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 5px;
+}
+.slider-header label { font-size: 0.75rem; color: var(--text-1); }
+.slider-val { font-size: 0.75rem; color: var(--gold); font-weight: 500; }
+
+input[type=range] {
+  width: 100%;
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+
+.slider-hints {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.65rem;
+  color: var(--text-2);
+  margin-top: 2px;
+}
+
+/* Buttons */
+.btn-gold {
+  width: 100%;
+  padding: 9px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.825rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--gold);
+  color: #06090F;
+  cursor: pointer;
+  margin-top: 13px;
+  transition: background 0.2s, transform 0.1s;
+}
+.btn-gold:hover  { background: var(--gold-lt); }
+.btn-gold:active { transform: scale(0.98); }
+
+.btn-ghost {
+  width: 100%;
+  padding: 8px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.8rem;
+  color: var(--text-1);
+  background: transparent;
+  border: 0.5px solid var(--border);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  margin-top: 6px;
+  transition: all 0.2s;
+}
+.btn-ghost:hover { color: var(--text-0); border-color: var(--border-hover); }
+
+/* Status */
+.status-inner {
+  background: var(--surface);
+  border-radius: var(--r-sm);
+  padding: 0.75rem 0.875rem;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 54px;
+}
+
+.turn-glyph {
+  font-size: 22px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: all 0.3s;
+}
+.turn-glyph.pulse { animation: pulse 1.1s ease-in-out infinite; }
+
+.status-txt  { font-size: 0.825rem; color: var(--text-0); line-height: 1.3; }
+.status-sub  { font-size: 0.72rem;  color: var(--text-1); margin-top: 2px; }
+
+/* Move history */
+.history-scroll {
+  max-height: 220px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--elevated) transparent;
+}
+.history-scroll::-webkit-scrollbar { width: 3px; }
+.history-scroll::-webkit-scrollbar-thumb { background: var(--elevated); border-radius: 3px; }
+
+.move-pair {
+  display: grid;
+  grid-template-columns: 22px 1fr 1fr;
+  gap: 4px;
+  padding: 3.5px 0;
+  border-bottom: 0.5px solid var(--border);
+  font-size: 0.8125rem;
+  animation: fadeUp 0.18s ease;
+}
+.move-pair:last-child { border-bottom: none; }
+.mn { color: var(--text-2); font-size: 0.7rem; padding-top: 1px; }
+.mw { color: var(--text-0); }
+.mb { color: var(--text-1); }
+
+.history-empty {
+  font-size: 0.8rem;
+  color: var(--text-2);
+  text-align: center;
+  padding: 1.25rem 0;
+  font-style: italic;
+}
+
+/* ── Animations ──────────────────────────────────────────────────────────── */
+@keyframes spin    { to { transform: rotate(360deg); } }
+@keyframes fadeIn  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fadeUp  { from { opacity:0; transform:translateY(5px); } to { opacity:1; transform:none; } }
+@keyframes pulse   { 0%,100%{opacity:1} 50%{opacity:0.35} }
+@keyframes slideIn { from{opacity:0;transform:translateX(16px)} to{opacity:1;transform:none} }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ── Header ── -->
+  <header>
+    <div class="header-left">
+      <h1>Chess <em>AI</em></h1>
+      <div class="byline">Vincent Do &mdash; Playable Chess AI Project</div>
+    </div>
+    <div class="conn-badge" id="conn-badge">
+      <span class="conn-dot"></span>
+      <span id="conn-text">Connecting&hellip;</span>
+    </div>
+  </header>
+
+  <!-- ── Main grid ── -->
+  <div class="main-grid">
+
+    <!-- Board -->
+    <div class="board-wrap">
+      <div class="board-frame" id="board-frame">
+        <div id="board"></div>
+
+        <div class="board-overlay" id="think-overlay">
+          <div class="spin-ring"></div>
+          <div class="thinking-lbl">Thinking&hellip;</div>
+        </div>
+
+        <div class="go-overlay" id="go-overlay">
+          <div class="go-card">
+            <div class="go-result" id="go-result">Game over</div>
+            <div class="go-detail" id="go-detail"></div>
+            <button class="btn-gold" id="btn-go-new" style="width:auto;padding:9px 32px;margin:0 auto;display:inline-block">
+              New game
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="board-controls">
+        <button class="ghost-btn" id="btn-flip">Flip board</button>
+        <button class="ghost-btn" id="btn-undo">Undo move</button>
+      </div>
+    </div>
+
+    <!-- Panel -->
+    <div class="panel">
+
+      <!-- Player selectors -->
+      <div class="card">
+        <div class="card-label">Players</div>
+
+        <div class="player-row">
+          <div class="piece-glyph w">♙</div>
+          <div class="player-label">White</div>
+          <select id="white-sel">
+            <option value="human">Human</option>
+            <option value="alphabeta">Alphabeta AI</option>
+            <option value="stockfish" selected>Stockfish</option>
+            <option value="random">Random</option>
+            <option value="magnus" id="mo-w" disabled>Magnus Carlsen</option>
+          </select>
+        </div>
+
+        <div class="vs-strip">versus</div>
+
+        <div class="player-row">
+          <div class="piece-glyph b">♟</div>
+          <div class="player-label">Black</div>
+          <select id="black-sel">
+            <option value="human" selected>Human</option>
+            <option value="alphabeta">Alphabeta AI</option>
+            <option value="stockfish">Stockfish</option>
+            <option value="random">Random</option>
+            <option value="magnus" id="mo-b" disabled>Magnus Carlsen</option>
+          </select>
+        </div>
+
+        <div class="slider-group" id="depth-grp" style="display:none">
+          <div class="slider-header">
+            <label>Alphabeta depth</label>
+            <span class="slider-val" id="depth-val">3</span>
+          </div>
+          <input type="range" id="depth-sl" min="1" max="4" value="3" step="1">
+          <div class="slider-hints"><span>Fast</span><span>Strongest</span></div>
+        </div>
+
+        <div class="slider-group" id="skill-grp" style="display:none">
+          <div class="slider-header">
+            <label>Stockfish skill level</label>
+            <span class="slider-val" id="skill-val">10</span>
+          </div>
+          <input type="range" id="skill-sl" min="0" max="20" value="10" step="1">
+          <div class="slider-hints"><span>Beginner</span><span>Master</span></div>
+        </div>
+
+        <button class="btn-gold"  id="btn-start">Start game</button>
+        <button class="btn-ghost" id="btn-reset">Reset board</button>
+      </div>
+
+      <!-- Status -->
+      <div class="card">
+        <div class="card-label">Status</div>
+        <div class="status-inner">
+          <div class="turn-glyph" id="turn-glyph">♙</div>
+          <div>
+            <div class="status-txt" id="status-txt">Pick players and press Start.</div>
+            <div class="status-sub" id="status-sub"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Move history -->
+      <div class="card">
+        <div class="card-label">Move history</div>
+        <div class="history-scroll">
+          <div id="hist-list"><div class="history-empty">No moves yet</div></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/jquery@3.7.1/dist/jquery.min.js"></script>
+<script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+<script src="https://unpkg.com/chess.js@0.10.3/chess.js"></script>
+<script>
+// ─── Configuration ────────────────────────────────────────────────────────────
+var API_URL = window.location.hostname === 'localhost'
+  ? 'http://localhost:5000'
+  : 'https://chess-ai-production-production.up.railway.app';
+
+// ─── State ────────────────────────────────────────────────────────────────────
+var chess        = new Chess();
+var board        = null;
+var sfEngine     = null;
+var gameRunning  = false;
+var isThinking   = false;
+var lastFrom     = null;
+var lastTo       = null;
+var legalSqs     = [];
+var magnusOK     = false;
+
+// ─── Backend health check ─────────────────────────────────────────────────────
+function checkBackend() {
+  fetch(API_URL + '/')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      setConn(true);
+      if (d.players && d.players.magnus) {
+        magnusOK = true;
+        ['w','b'].forEach(function(c) {
+          var o = document.getElementById('mo-' + c);
+          if (o) { o.disabled = false; o.textContent = 'Magnus Carlsen'; }
+        });
+      }
+    })
+    .catch(function() { setConn(false); });
+}
+
+function setConn(ok) {
+  var b = document.getElementById('conn-badge');
+  b.className = 'conn-badge ' + (ok ? 'online' : 'offline');
+  document.getElementById('conn-text').textContent = ok ? 'Backend online' : 'Backend offline';
+}
+
+// ─── Stockfish worker ─────────────────────────────────────────────────────────
+function initStockfish() {
+    if (sfEngine) sfEngine.terminate();
+    var sfPath = (window.location.hostname === 'localhost' || 
+                  window.location.hostname === '127.0.0.1')
+                  ? '/stockfish.js'
+                  : '/playable-chess-AI/stockfish.js';
+    sfEngine = new Worker(sfPath);
+    sfEngine.onmessage = function(e) {
+        if (typeof e.data !== 'string') return;
+        if (e.data.startsWith('bestmove')) {
+            var uci = e.data.split(' ')[1];
+            if (uci && uci !== '(none)') commitUci(uci);
+            else setThinking(false);
+        }
+    };
+    sfEngine.postMessage('uci');
+    sfEngine.postMessage('setoption name Skill Level value ' + $('#skill-sl').val());
+    sfEngine.postMessage('isready');
+}
+
+// ─── Board ────────────────────────────────────────────────────────────────────
+function initBoard() {
+  board = Chessboard('board', {
+    draggable: true,
+    position: 'start',
+    pieceTheme: function(piece) {
+        var color  = piece[0];
+        var type   = piece[1];
+        var suffix = color === 'w' ? '_w' : '_b';
+        var base   = window.location.hostname === 'localhost' || 
+                    window.location.hostname === '127.0.0.1'
+                    ? '' : '/playable-chess-AI';
+        return base + '/pieces/' + type + suffix + '.png';
+    },
+
+    onDragStart:       onDragStart,
+    onDrop:            onDrop,
+    onSnapEnd:         function() { board.position(chess.fen()); },
+    onMouseoverSquare: onHover,
+    onMouseoutSquare:  clearLegal,
+  });
+}
+
+function onDragStart(src, piece) {
+  if (!gameRunning || chess.game_over() || isThinking) return false;
+  var t = chess.turn(), wp = $('#white-sel').val(), bp = $('#black-sel').val();
+  if (t === 'w' && wp !== 'human') return false;
+  if (t === 'b' && bp !== 'human') return false;
+  if (t === 'w' && piece[0] === 'b') return false;
+  if (t === 'b' && piece[0] === 'w') return false;
+  showLegal(src);
+}
+
+function onDrop(src, tgt) {
+  clearLegal();
+  var m = chess.move({ from: src, to: tgt, promotion: 'q' });
+  if (!m) return 'snapback';
+  lastFrom = src; lastTo = tgt;
+  afterMove();
+}
+
+function onHover(sq, piece) {
+  if (!gameRunning || isThinking || !piece) return;
+  var t = chess.turn(), wp = $('#white-sel').val(), bp = $('#black-sel').val();
+  if (t === 'w' && wp !== 'human') return;
+  if (t === 'b' && bp !== 'human') return;
+  if (t === 'w' && piece[0] === 'b') return;
+  if (t === 'b' && piece[0] === 'w') return;
+  showLegal(sq);
+}
+
+function showLegal(sq) {
+  clearLegal();
+  chess.moves({ square: sq, verbose: true }).forEach(function(m) {
+    $('.square-' + m.to).addClass('highlight-legal');
+    legalSqs.push(m.to);
+  });
+}
+
+function clearLegal() {
+  legalSqs.forEach(function(s) { $('.square-' + s).removeClass('highlight-legal'); });
+  legalSqs = [];
+}
+
+function clearLastMove() {
+  if (lastFrom) $('.square-' + lastFrom).removeClass('highlight-last');
+  if (lastTo)   $('.square-' + lastTo).removeClass('highlight-last');
+}
+
+function applyCheck() {
+  $('.highlight-check').removeClass('highlight-check');
+  if (!chess.in_check()) return;
+  var color = chess.turn(), b = chess.board();
+  for (var r = 0; r < 8; r++) {
+    for (var c = 0; c < 8; c++) {
+      var p = b[r][c];
+      if (p && p.type === 'k' && p.color === color) {
+        $('.square-' + String.fromCharCode(97+c) + (8-r)).addClass('highlight-check');
+        return;
+      }
+    }
+  }
+}
+
+// ─── Move pipeline ────────────────────────────────────────────────────────────
+function commitUci(uci) {
+  var m = chess.move({ from: uci.slice(0,2), to: uci.slice(2,4), promotion: uci[4] || 'q' });
+  if (!m) { setThinking(false); return; }
+  lastFrom = uci.slice(0,2); lastTo = uci.slice(2,4);
+  board.position(chess.fen());
+  afterMove();
+}
+
+function afterMove() {
+    clearLastMove();
+    applyCheck();
+    updateStatus();
+    updateHistory();
+    setThinking(false);
+    if (chess.game_over()) { showGameOver(); return; }
+    setTimeout(triggerAI, 280);
+}
+
+function triggerAI() {
+  if (!gameRunning || chess.game_over() || isThinking) return;
+  var t = chess.turn();
+  var current = (t === 'w') ? $('#white-sel').val() : $('#black-sel').val();
+  if (current === 'human') return;
+
+  setThinking(true);
+
+  if (current === 'random') {
+    setTimeout(function() {
+      var moves = chess.moves();
+      if (!moves.length) { setThinking(false); return; }
+      var m = chess.move(moves[Math.floor(Math.random() * moves.length)]);
+      if (m) { lastFrom = m.from; lastTo = m.to; board.position(chess.fen()); afterMove(); }
+      else setThinking(false);
+    }, 220);
+    return;
+  }
+
+  if (current === 'stockfish') {
+    if (!sfEngine) initStockfish();
+    sfEngine.postMessage('setoption name Skill Level value ' + $('#skill-sl').val());
+    sfEngine.postMessage('position fen ' + chess.fen());
+    sfEngine.postMessage('go movetime 600');
+    return;
+  }
+
+  // alphabeta or magnus — Flask API
+  var payload = { fen: chess.fen(), player: current };
+  if (current === 'alphabeta') payload.depth = parseInt($('#depth-sl').val());
+
+  fetch(API_URL + '/api/move', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.move) commitUci(d.move);
+    else { console.error('API error:', d.error); setThinking(false); }
+  })
+  .catch(function(e) { console.error('API failed:', e); setThinking(false); });
+}
+
+// ─── UI helpers ───────────────────────────────────────────────────────────────
+function setThinking(val) {
+  isThinking = val;
+  document.getElementById('think-overlay').className = 'board-overlay' + (val ? ' active' : '');
+  document.getElementById('board-frame').className   = 'board-frame' + (val ? ' thinking' : '');
+  document.getElementById('turn-glyph').className    = 'turn-glyph' + (val ? ' pulse' : '');
+}
+
+var playerNames = {
+  human: 'Human', alphabeta: 'Alphabeta AI',
+  stockfish: 'Stockfish', random: 'Random', magnus: 'Magnus Carlsen'
+};
+
+function updateStatus() {
+  var txt = document.getElementById('status-txt');
+  var sub = document.getElementById('status-sub');
+  var gl  = document.getElementById('turn-glyph');
+
+  if (chess.in_checkmate()) {
+    txt.textContent = (chess.turn()==='w' ? 'Black' : 'White') + ' wins by checkmate';
+    sub.textContent = ''; return;
+  }
+  if (chess.in_draw()) {
+    txt.textContent = 'Draw';
+    sub.textContent = chess.in_stalemate() ? 'Stalemate'
+                    : chess.insufficient_material() ? 'Insufficient material'
+                    : '50-move rule or repetition';
+    return;
+  }
+
+  var side    = chess.turn() === 'w' ? 'White' : 'Black';
+  var pType   = chess.turn() === 'w' ? $('#white-sel').val() : $('#black-sel').val();
+  var moveNum = Math.ceil(chess.history().length / 2) + 1;
+
+  gl.textContent  = chess.turn() === 'w' ? '♙' : '♟';
+  txt.textContent = chess.in_check() ? side + ' is in check!' : side + ' to move';
+  sub.textContent = (playerNames[pType] || pType) + ' \u00b7 Move ' + moveNum;
+}
+
+function updateHistory() {
+  var hist = chess.history();
+  var el   = document.getElementById('hist-list');
+  if (!hist.length) { el.innerHTML = '<div class="history-empty">No moves yet</div>'; return; }
+  var html = '';
+  for (var i = 0; i < hist.length; i += 2) {
+    var n = Math.floor(i/2) + 1;
+    html += '<div class="move-pair">'
+          + '<span class="mn">' + n + '.</span>'
+          + '<span class="mw">' + hist[i] + '</span>'
+          + '<span class="mb">' + (hist[i+1] || '') + '</span>'
+          + '</div>';
+  }
+  el.innerHTML = html;
+  var sc = el.parentElement; sc.scrollTop = sc.scrollHeight;
+}
+
+function showGameOver() {
+  gameRunning = false;
+  var r = document.getElementById('go-result');
+  var d = document.getElementById('go-detail');
+  if (chess.in_checkmate()) {
+    r.textContent = 'Checkmate';
+    d.textContent = (chess.turn() === 'w' ? 'Black' : 'White') + ' wins';
+  } else {
+    r.textContent = 'Draw';
+    d.textContent = chess.in_stalemate() ? 'Stalemate' : '50-move rule or repetition';
+  }
+  document.getElementById('go-overlay').className = 'go-overlay active';
+}
+
+function doReset() {
+  chess.reset();
+  board.start();
+  gameRunning = false; isThinking = false;
+  lastFrom = lastTo = null; legalSqs = [];
+  clearLastMove();
+  $('.highlight-check').removeClass('highlight-check');
+  setThinking(false);
+  document.getElementById('go-overlay').className = 'go-overlay';
+  document.getElementById('status-txt').textContent = 'Pick players and press Start.';
+  document.getElementById('status-sub').textContent = '';
+  document.getElementById('turn-glyph').textContent = '♙';
+  document.getElementById('hist-list').innerHTML = '<div class="history-empty">No moves yet</div>';
+}
+
+function syncSliders() {
+  var wp = $('#white-sel').val(), bp = $('#black-sel').val();
+  $('#depth-grp').toggle(wp === 'alphabeta' || bp === 'alphabeta');
+  $('#skill-grp').toggle(wp === 'stockfish'  || bp === 'stockfish');
+}
+
+// ─── Events ───────────────────────────────────────────────────────────────────
+$('#btn-start').on('click', function() {
+  doReset();
+  gameRunning = true;
+  initStockfish();
+  updateStatus();
+  setTimeout(triggerAI, 400);
+});
+
+$('#btn-reset').on('click', doReset);
+$('#btn-go-new').on('click', doReset);
+$('#btn-flip').on('click', function() { board.flip(); });
+
+$('#btn-undo').on('click', function() {
+  if (!gameRunning || isThinking) return;
+  chess.undo(); chess.undo();
+  board.position(chess.fen());
+  clearLastMove(); clearLegal();
+  $('.highlight-check').removeClass('highlight-check');
+  lastFrom = lastTo = null;
+  updateStatus(); updateHistory();
+});
+
+$('#white-sel, #black-sel').on('change', syncSliders);
+
+$('#depth-sl').on('input', function() { document.getElementById('depth-val').textContent = this.value; });
+$('#skill-sl').on('input', function() {
+    document.getElementById('skill-val').textContent = this.value;
+});
+$('#skill-sl').on('change', function() {
+    if (sfEngine) sfEngine.postMessage('setoption name Skill Level value ' + this.value);
+});
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+initBoard();
+checkBackend();
+syncSliders();
+</script>
+</body>
+</html>

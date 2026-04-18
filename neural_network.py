@@ -1,27 +1,47 @@
-import pandas as pd
-import chess.pgn
-import chess
-import io
+"""Chess move prediction model — PyTorch, GPU-accelerated."""
+
+import os
+import glob
 import re
-import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense, Conv2D, Flatten, LSTM, Dropout
-from tensorflow.keras.models import Model
-from tensorflow.keras.utils import to_categorical
+import random
 
 import numpy as np
+import chess
+import chess.pgn
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+
+# Config
+TRAIN_DIR  = 'data/train_chunks'
+VAL_DIR    = 'data/val_chunks'
+#MODEL_PATH = 'data/grandmaster_model_v2.pt'
+MODEL_PATH = 'model/grandmaster_model_v2.pt'
+BATCH_SIZE = 512
+EPOCHS     = 50
+SEQ_LEN    = 10
+LR         = 1e-3
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if __name__ == '__main__':
+    print(f"Using device: {DEVICE}")
+    if DEVICE.type == 'cuda':
+        print(f"  GPU: {torch.cuda.get_device_name(0)}")
 
 piece_to_index = {
-        'p': 0, 'n': 1, 'b': 2, 'r': 3, 'q': 4, 'k': 5,
-        'P': 6, 'N': 7, 'B': 8, 'R': 9, 'Q': 10, 'K': 11,
-        'ck': 12, 'cq': 13, 'CK': 14, 'CQ': 15  # Castling rights
-    }
+    'p': 0, 'n': 1, 'b': 2, 'r': 3, 'q': 4, 'k': 5,
+    'P': 6, 'N': 7, 'B': 8, 'R': 9, 'Q': 10, 'K': 11,
+    'ck': 12, 'cq': 13, 'CK': 14, 'CQ': 15
+}
 
-def fen_to_tensor(fen):
+# Data helpers
+
+def fen_to_tensor(fen, flip: bool = False):
+    """FEN → 8x8x16 tensor. flip=True rotates for Black so the model always sees its own pieces at the bottom."""
     tensor = np.zeros((8, 8, 16), dtype=np.float32)
     parts = fen.split(' ')
     rows = parts[0].split('/')
     for i, row in enumerate(rows):
-        # tensor_row = i
         tensor_row = 7 - i
         j = 0
         for char in row:
@@ -29,246 +49,254 @@ def fen_to_tensor(fen):
                 j += int(char)
             else:
                 tensor[tensor_row, j, piece_to_index[char]] = 1
-                # tensor[tensor_row, j, piece_to_index[char]] = 1
                 j += 1
     castling = parts[2]
-    if 'K' in castling:
-        tensor[:, :, piece_to_index['CK']] = 1
-    if 'Q' in castling:
-        tensor[:, :, piece_to_index['CQ']] = 1
-    if 'k' in castling:
-        tensor[:, :, piece_to_index['ck']] = 1
-    if 'q' in castling:
-        tensor[:, :, piece_to_index['cq']] = 1
+    if 'K' in castling: tensor[:, :, piece_to_index['CK']] = 1
+    if 'Q' in castling: tensor[:, :, piece_to_index['CQ']] = 1
+    if 'k' in castling: tensor[:, :, piece_to_index['ck']] = 1
+    if 'q' in castling: tensor[:, :, piece_to_index['cq']] = 1
+
+    if flip:
+        # Rotate board 180 degrees: reverse both rows and columns
+        tensor = tensor[::-1, ::-1, :].copy()
+
     return tensor
 
-
 def square_to_index(square):
-    # Converts a square in algebraic notation to an index (0-63)
-    square = square.lower()
+    return chess.parse_square(square.lower()[:2])
 
-    # Validation for the length of the input
-    # if len(square) != 2:
-    #     raise ValueError("Invalid square length")
+def flip_square(sq: int) -> int:
+    """Mirror a square index 180 degrees (a1=0 <-> h8=63)."""
+    return 63 - sq
 
-    # Validation for file
-    file = ord(square[0]) - ord('a')
-    if file < 0 or file > 7:
-        raise ValueError("Invalid file")
-
-    # Validation for rank
-    try:
-        rank = 8 - int(square[1])
-    except ValueError:
-        raise ValueError("Invalid rank")
-
-    if rank < 0 or rank > 7:
-        raise ValueError("Invalid rank")
-
-    return 8 * rank + file
-
-def move_to_vector(move):
-    # Converts a chess move to a one-hot encoded vector
-    # TODO: possibly Check for castling, en passant, pawn promotion
+def move_to_vector(move, flip: bool = False):
+    """Encode a chess.Move as a 132-dim float vector."""
     vector = np.zeros(132, dtype=np.float32)
-    from_square = square_to_index(move.uci()[:2])
-    to_square = square_to_index(move.uci()[2:4])
-    vector[from_square] = 1
-    vector[64 + to_square] = 1
-
-    # Handling pawn promotion
+    from_sq = flip_square(move.from_square) if flip else move.from_square
+    to_sq   = flip_square(move.to_square)   if flip else move.to_square
+    vector[from_sq] = 1
+    vector[64 + to_sq] = 1
     if move.promotion is not None:
-        if move.promotion == chess.KNIGHT:
-            vector[128] = 1  # Knight promotion
-        elif move.promotion == chess.BISHOP:
-            vector[129] = 1  # Bishop promotion
-        elif move.promotion == chess.ROOK:
-            vector[130] = 1  # Rook promotion
-        elif move.promotion == chess.QUEEN:
-            vector[131] = 1  # Queen promotion
-
+        promo_map = {chess.KNIGHT: 128, chess.BISHOP: 129,
+                     chess.ROOK: 130,  chess.QUEEN: 131}
+        idx = promo_map.get(move.promotion)
+        if idx is not None:
+            vector[idx] = 1
     return vector
 
-def move_sequence_to_vector(move_sequence, max_length=10):
-    # Initialize a zero matrix for the sequence with shape (max_length, 132)
-    sequence_vector = np.zeros((max_length, 132), dtype=np.float32)
-
-    # Fill the matrix with move vectors
+def move_sequence_to_vector(move_sequence, max_length=10, flip: bool = False):
+    """Encode a list of chess.Move objects as a (max_length, 132) matrix."""
+    seq = np.zeros((max_length, 132), dtype=np.float32)
     for i, move in enumerate(move_sequence[-max_length:]):
-        from_square = square_to_index(move.uci()[:2])
-        to_square = square_to_index(move.uci()[2:4])
-        move_vector = np.zeros(132, dtype=np.float32)
-        move_vector[from_square] = 1
-        move_vector[64 + to_square] = 1
-
-        # Handling pawn promotion
-        if move.promotion is not None:
-            if move.promotion == chess.KNIGHT:
-                move_vector[128] = 1  # Knight promotion
-            elif move.promotion == chess.BISHOP:
-                move_vector[129] = 1  # Bishop promotion
-            elif move.promotion == chess.ROOK:
-                move_vector[130] = 1  # Rook promotion
-            elif move.promotion == chess.QUEEN:
-                move_vector[131] = 1  # Queen promotion
-
-        sequence_vector[i] = move_vector
-
-    return sequence_vector
+        seq[i] = move_to_vector(move, flip=flip)
+    return seq
 
 def move_to_index(move, board):
-
+    """Return (from_sq, to_sq) as integers. Flipping is handled by the caller."""
     if move not in board.legal_moves:
-        raise ValueError("Invalid move")
+        raise ValueError(f"Move {move.uci()} is not legal in this position.")
+    return move.from_square, move.to_square
 
-    move_index = np.zeros(132, dtype=int)
-    from_index = move.from_square
-    to_index = move.to_square
-
-    # Encode the 'from' and 'to' squares
-    move_index[from_index] = 1
-    move_index[64 + to_index] = 1
-
-    # Handling pawn promotion
-    if move.promotion is not None:
-        promotion_offset = 128  # Offset for the promotion piece encoding
-        # Map the promotion piece to the corresponding index
-        promotion_piece = move.promotion
-        if promotion_piece == chess.KNIGHT:
-            move_index[promotion_offset] = 1  # Knight promotion
-        elif promotion_piece == chess.BISHOP:
-            move_index[promotion_offset + 1] = 1  # Bishop promotion
-        elif promotion_piece == chess.ROOK:
-            move_index[promotion_offset + 2] = 1  # Rook promotion
-        elif promotion_piece == chess.QUEEN:
-            move_index[promotion_offset + 3] = 1  # Queen promotion
-
-    return move_index
-
-# Parsing the PGN file to extract relevant data
 def parse_pgn(file_path, sequence_length=10):
+    """Generator over annotated moves in a PGN. Used by preprocess.py only."""
     with open(file_path) as pgn_file:
         while True:
             game = chess.pgn.read_game(pgn_file)
             if game is None:
                 break
-
             board = game.board()
             recent_moves = []
             for node in game.mainline():
                 move = node.move
-                fen = board.fen()
-                board_tensor = fen_to_tensor(fen)
-
+                is_black = (board.turn == chess.BLACK)
+                board_tensor = fen_to_tensor(board.fen(), flip=is_black)
                 recent_moves.append(move)
                 if len(recent_moves) > sequence_length:
                     recent_moves.pop(0)
-
-                move_vector = move_to_vector(move)
-
-                # Extracting additional information from comments
+                move_vector = move_to_vector(move, flip=is_black)
                 comment = node.comment
-                eval_match = re.search(r'\[%eval: ([^\]]+)\]', comment)
                 best_move_match = re.search(r'\[%best_move: ([^\]]+)\]', comment)
-                played_best_move_match = re.search(r'\[%played_best_move: ([^\]]+)\]', comment)
-
-                evaluation = eval_match.group(1) if eval_match else None
                 best_move = best_move_match.group(1) if best_move_match else None
-                played_best_move = played_best_move_match.group(1) if played_best_move_match else None
-                target_index = move_to_index(board.parse_uci(best_move), board)
-
-                # Yielding the data for each move
-                yield board_tensor, recent_moves, move_vector, evaluation, best_move, played_best_move, target_index
+                if best_move is None:
+                    board.push(move)
+                    continue
+                bm = board.parse_uci(best_move)
+                from_idx, to_idx = move_to_index(bm, board)
+                # Flip target square indices when it's Black's turn
+                if is_black:
+                    from_idx = flip_square(from_idx)
+                    to_idx   = flip_square(to_idx)
+                yield (board_tensor, recent_moves, move_vector,
+                       None, best_move, None, (from_idx, to_idx))
                 board.push(move)
 
-def create_chess_model():
-    # Board input: 8x8x16 tensor
-    board_input = Input(shape=(8, 8, 16), name='board_input')
+# Dataset
 
-    # CNN layers for board analysis
-    x = Conv2D(64, kernel_size=(3, 3), activation='relu')(board_input)
-    x = Conv2D(64, kernel_size=(3, 3), activation='relu')(x)
-    x = Flatten()(x)
+class ChunkDataset(torch.utils.data.IterableDataset):
+    """Streams .npz chunk files sequentially — no random-access disk thrashing."""
+    def __init__(self, chunk_dir, shuffle=True):
+        self.chunk_paths = sorted(glob.glob(os.path.join(chunk_dir, 'chunk_*.npz')))
+        if not self.chunk_paths:
+            raise FileNotFoundError(
+                f"No chunk files found in {chunk_dir!r}. Run preprocess.py first."
+            )
+        self.shuffle = shuffle
+        total = sum(len(np.load(p)['boards']) for p in self.chunk_paths)
+        print(f"Found {len(self.chunk_paths)} chunks in {chunk_dir}  ({total:,} positions)")
 
-    # Move sequence input
-    move_input = Input(shape=(10, 132), name='move_input')  # Example: 10 timesteps, each with 132 features
-    y = LSTM(64)(move_input)
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        paths = self.chunk_paths.copy()
+        if self.shuffle:
+            random.shuffle(paths)
+        if worker_info is not None:
+            paths = paths[worker_info.id::worker_info.num_workers]
 
-    # Combine CNN and RNN outputs
-    combined = tf.keras.layers.concatenate([x, y])
+        for path in paths:
+            data    = np.load(path)
+            boards  = data['boards']
+            moves   = data['moves']
+            from_sq = data['from_sq']
+            to_sq   = data['to_sq']
+            indices = np.random.permutation(len(boards)) if self.shuffle else np.arange(len(boards))
+            for i in indices:
+                board = torch.tensor(boards[i],  dtype=torch.float32).permute(2, 0, 1)
+                move  = torch.tensor(moves[i],   dtype=torch.float32)
+                f_sq  = torch.tensor(from_sq[i], dtype=torch.long)
+                t_sq  = torch.tensor(to_sq[i],   dtype=torch.long)
+                yield board, move, f_sq, t_sq
 
-    # Dense layers for decision making
-    z = Dense(132, activation='relu')(combined)
-    z = Dropout(0.5)(z)  # Dropout for regularization
-    z = Dense(64, activation='relu')(z)
+# Model
 
-    # Output layer for move prediction
-    move_output = Dense(132, activation='softmax', name='move_output')(z)
+class ChessModel(nn.Module):
+    """CNN (board) + LSTM (move history) → two 64-class heads (from-square, to-square)."""
+    def __init__(self):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv2d(16, 64, kernel_size=3),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+        self.lstm = nn.LSTM(input_size=132, hidden_size=64, batch_first=True)
+        self.fc = nn.Sequential(
+            nn.Linear(1088, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),  # Dropout removed — hurts chess CNN performance
+            nn.ReLU(),
+        )
+        self.from_head = nn.Linear(128, 64)
+        self.to_head   = nn.Linear(128, 64)
 
-    # Creating the model
-    model = Model(inputs=[board_input, move_input], outputs=[move_output])
+    def forward(self, board, moves):
+        cnn_out = self.cnn(board)
+        _, (hidden, _) = self.lstm(moves)
+        lstm_out = hidden.squeeze(0)
+        combined = torch.cat([cnn_out, lstm_out], dim=1)
+        z = self.fc(combined)
+        return self.from_head(z), self.to_head(z)
 
-    # Compile the model
-    # model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+# Training
 
-    return model
+def train_one_epoch(model, loader, optimizer, scaler, criterion, device):
+    model.train()
+    total_loss = from_correct = to_correct = total = 0
+    for boards, moves, from_sq, to_sq in loader:
+        boards  = boards.to(device)
+        moves   = moves.to(device)
+        from_sq = from_sq.to(device)
+        to_sq   = to_sq.to(device)
+        optimizer.zero_grad()
+        with torch.amp.autocast('cuda'):
+            from_logits, to_logits = model(boards, moves)
+            loss = criterion(from_logits, from_sq) + criterion(to_logits, to_sq)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        n = boards.size(0)
+        total_loss   += loss.item() * n
+        from_correct += (from_logits.argmax(1) == from_sq).sum().item()
+        to_correct   += (to_logits.argmax(1)   == to_sq).sum().item()
+        total        += n
+    return total_loss / total, from_correct / total, to_correct / total
 
-# Data Generation for Training
-def generate_batches(file_path, batch_size=32, sequence_length=10):
-    batch_board_tensors = []
-    batch_move_sequences = []
-    batch_targets = []  # Store the correct moves for each board state
+@torch.no_grad()
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    total_loss = from_correct = to_correct = total = 0
+    for boards, moves, from_sq, to_sq in loader:
+        boards  = boards.to(device)
+        moves   = moves.to(device)
+        from_sq = from_sq.to(device)
+        to_sq   = to_sq.to(device)
+        with torch.amp.autocast('cuda'):
+            from_logits, to_logits = model(boards, moves)
+            loss = criterion(from_logits, from_sq) + criterion(to_logits, to_sq)
+        n = boards.size(0)
+        total_loss   += loss.item() * n
+        from_correct += (from_logits.argmax(1) == from_sq).sum().item()
+        to_correct   += (to_logits.argmax(1)   == to_sq).sum().item()
+        total        += n
+    return total_loss / total, from_correct / total, to_correct / total
 
-    for board_tensor, recent_moves, move_vector, evaluation, correct_move_vector, played_best_move, target_index  in parse_pgn(file_path):
-        move_sequence_vector = move_sequence_to_vector(recent_moves, max_length=sequence_length)
-
-        batch_board_tensors.append(board_tensor)
-        batch_move_sequences.append(move_sequence_vector)
-        correct_move_vector = target_index
-        batch_targets.append(correct_move_vector)  # Assuming you have target data
-
-        if len(batch_board_tensors) == batch_size:
-            yield (np.array(batch_board_tensors), np.array(batch_move_sequences)), np.array(batch_targets)
-            # yield np.array(batch_board_tensors), np.array(batch_move_sequences), np.array(batch_targets)
-            batch_board_tensors = []
-            batch_move_sequences = []
-            batch_targets = []  # Reset for next batch
-
-# for board_tensor, recent_moves, move_vector, evaluation, correct_move_vector, played_best_move, target_index  in parse_pgn('C:/Users/vince/Downloads/games.pgn'):
-#         tmp = 1
 def main():
-    # Training Loop
-    model = create_chess_model()
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
 
-    epochs = 10  # Set the number of epochs
-    batch_size = 32  # Set the batch size
-    # train_file_path = 'C:/Users/vince/Downloads/games.pgn'  # Path to training PGN file
-    train_file_path = 'C:/Users/vince/Downloads/GM_games_eval - Copy.pgn'  # Path to training PGN file
-    # validation_file_path = 'C:/Users/vince/Downloads/validation.pgn'  # Path to validation PGN file
-    validation_file_path = 'C:/Users/vince/Downloads/magnus_evalv2.pgn'  # Path to validation PGN file
+    print("Loading training dataset...")
+    train_ds = ChunkDataset(TRAIN_DIR, shuffle=True)
+    print("Loading validation dataset...")
+    val_ds   = ChunkDataset(VAL_DIR,   shuffle=False)
 
-    for epoch in range(epochs):
-        print(f"Epoch {epoch+1}/{epochs}")
-        
-        # Training
-        for (batch_board_tensors, batch_move_sequences), batch_targets in generate_batches(train_file_path, batch_size):
-            train_loss, train_accuracy = model.train_on_batch([batch_board_tensors, batch_move_sequences], batch_targets)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE,
+                              num_workers=4, pin_memory=True,
+                              persistent_workers=True)
+    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE,
+                              num_workers=2, pin_memory=True,
+                              persistent_workers=True)
 
+    model     = ChessModel().to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    criterion = nn.CrossEntropyLoss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3
+    )
+    scaler = torch.amp.GradScaler('cuda')
 
+    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"Batch size : {BATCH_SIZE}  |  Max epochs : {EPOCHS}\n")
 
-        # Validation
-        validation_loss, validation_accuracy = 0, 0
-        validation_batches = 0
-        for batch_board_tensors, batch_move_vectors in generate_batches(validation_file_path, batch_size):
-            loss, accuracy = model.test_on_batch(batch_board_tensors, batch_move_vectors)
-            validation_loss += loss
-            validation_accuracy += accuracy
-            validation_batches += 1
-    model.summary()
-    model.save('data/grandmaster_model_v2.h5')
-    model.save('data/grandmaster_model_v2.keras')
-    # model.save('data/tmp.keras')
+    best_val_loss       = float('inf')
+    patience_count      = 0
+    EARLY_STOP_PATIENCE = 5
+
+    for epoch in range(1, EPOCHS + 1):
+        print(f"Epoch {epoch}/{EPOCHS}")
+        tr_loss, tr_from, tr_to = train_one_epoch(
+            model, train_loader, optimizer, scaler, criterion, DEVICE)
+        vl_loss, vl_from, vl_to = evaluate(
+            model, val_loader, criterion, DEVICE)
+        print(f"  train  loss={tr_loss:.4f}  from_acc={tr_from:.4f}  to_acc={tr_to:.4f}")
+        print(f"  val    loss={vl_loss:.4f}  from_acc={vl_from:.4f}  to_acc={vl_to:.4f}")
+        scheduler.step(vl_loss)
+        if vl_loss < best_val_loss:
+            best_val_loss  = vl_loss
+            patience_count = 0
+            torch.save({
+                'epoch':                epoch,
+                'model_state_dict':     model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss':             best_val_loss,
+            }, MODEL_PATH)
+            print(f"  Saved best model (val_loss={best_val_loss:.4f})")
+        else:
+            patience_count += 1
+            print(f"  No improvement ({patience_count}/{EARLY_STOP_PATIENCE})")
+            if patience_count >= EARLY_STOP_PATIENCE:
+                print(f"\nEarly stopping at epoch {epoch}.")
+                break
+
+    print(f"\nTraining complete. Best model saved to: {MODEL_PATH}")
 
 if __name__ == '__main__':
     main()

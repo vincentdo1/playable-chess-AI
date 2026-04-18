@@ -1,6 +1,9 @@
-pygame
-chess
-pandas
-io
-re
-chess.pgn
+# Railway server requirements
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.11.0+cpu
+torchvision==0.26.0+cpu
+
+flask>=3.0.0
+flask-cors>=4.0.0
+chess>=1.10.0
+numpy>=1.26.0
