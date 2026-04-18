@@ -169,6 +169,7 @@ def _evaluate_board(board: chess.Board) -> float:
     return raw if board.turn == chess.WHITE else -raw
 
 
+
 def _alphabeta_search(board: chess.Board, depth: int,
                       alpha: float, beta: float) -> float:
     """
@@ -176,7 +177,13 @@ def _alphabeta_search(board: chess.Board, depth: int,
     the side to move at this node. Used internally by
     predict_next_move_with_search.
     """
-    if depth == 0 or board.is_game_over():
+    if board.is_checkmate():
+        return -10000 + depth  # mated — shorter mate scores higher
+
+    if board.is_stalemate() or board.is_insufficient_material():
+        return 0
+
+    if depth == 0:
         return _evaluate_board(board)
 
     best = float('-inf')
