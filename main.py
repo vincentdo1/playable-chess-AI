@@ -4,10 +4,7 @@ from PIL import Image
 import chess
 import chess_player
 
-################################################################################################
-# Main chess-playing application.
 # Vincent Do, April 2026
-#
 class ChessGame:
     def __init__(self, white_player="you", black_player="random"):
         pygame.init()
@@ -31,8 +28,7 @@ class ChessGame:
         self.white_player = white_player
         self.black_player = black_player
 
-        # Only load the Magnus model if it is actually needed — avoids the
-        # startup warning and slow load when neither player is magnus_carlsen
+        # Load Magnus model lazily — only when actually needed.
         self._magnus_model = None
         self._predict_fn   = None
         if white_player == "magnus_carlsen" or black_player == "magnus_carlsen":
@@ -95,10 +91,7 @@ class ChessGame:
         if self.board.is_game_over():
             return
 
-        # Determine which player type is currently moving, then dispatch.
-        # Checking the current side first means argument order never affects
-        # behaviour — white_player and black_player are looked up by turn,
-        # not by the order they were passed on the command line.
+        # Dispatch based on whose turn it is — argument order never matters.
         current = self.white_player if self.board.turn == chess.WHITE else self.black_player
 
         if current == "you":

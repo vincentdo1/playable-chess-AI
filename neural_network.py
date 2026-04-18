@@ -1,6 +1,4 @@
-"""
-neural_network.py — Chess move prediction model (PyTorch, GPU-accelerated).
-"""
+"""Chess move prediction model — PyTorch, GPU-accelerated."""
 
 import os
 import glob
@@ -14,9 +12,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-# ---------------------------------------------------------------------------
 # Config
-# ---------------------------------------------------------------------------
 TRAIN_DIR  = 'data/train_chunks'
 VAL_DIR    = 'data/val_chunks'
 #MODEL_PATH = 'data/grandmaster_model_v2.pt'
@@ -25,7 +21,6 @@ BATCH_SIZE = 512
 EPOCHS     = 50
 SEQ_LEN    = 10
 LR         = 1e-3
-# ---------------------------------------------------------------------------
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 if __name__ == '__main__':
@@ -39,21 +34,10 @@ piece_to_index = {
     'ck': 12, 'cq': 13, 'CK': 14, 'CQ': 15
 }
 
-
-# ---------------------------------------------------------------------------
 # Data helpers
-# ---------------------------------------------------------------------------
 
 def fen_to_tensor(fen, flip: bool = False):
-    """
-    Convert a FEN string to an 8x8x16 numpy tensor.
-
-    flip=True rotates the board 180 degrees so it is always seen from
-    the perspective of the side to move. When flip=True (Black's turn),
-    Black's pieces appear at the bottom and White's at the top, exactly
-    mirroring how White positions look when flip=False. This lets the
-    model learn a single set of patterns that apply to both colors.
-    """
+    """FEN → 8x8x16 tensor. flip=True rotates for Black so the model always sees its own pieces at the bottom."""
     tensor = np.zeros((8, 8, 16), dtype=np.float32)
     parts = fen.split(' ')
     rows = parts[0].split('/')
@@ -78,15 +62,12 @@ def fen_to_tensor(fen, flip: bool = False):
 
     return tensor
 
-
 def square_to_index(square):
     return chess.parse_square(square.lower()[:2])
-
 
 def flip_square(sq: int) -> int:
     """Mirror a square index 180 degrees (a1=0 <-> h8=63)."""
     return 63 - sq
-
 
 def move_to_vector(move, flip: bool = False):
     """Encode a chess.Move as a 132-dim float vector."""
@@ -103,7 +84,6 @@ def move_to_vector(move, flip: bool = False):
             vector[idx] = 1
     return vector
 
-
 def move_sequence_to_vector(move_sequence, max_length=10, flip: bool = False):
     """Encode a list of chess.Move objects as a (max_length, 132) matrix."""
     seq = np.zeros((max_length, 132), dtype=np.float32)
@@ -111,13 +91,11 @@ def move_sequence_to_vector(move_sequence, max_length=10, flip: bool = False):
         seq[i] = move_to_vector(move, flip=flip)
     return seq
 
-
 def move_to_index(move, board):
     """Return (from_sq, to_sq) as integers. Flipping is handled by the caller."""
     if move not in board.legal_moves:
         raise ValueError(f"Move {move.uci()} is not legal in this position.")
     return move.from_square, move.to_square
-
 
 def parse_pgn(file_path, sequence_length=10):
     """Generator over annotated moves in a PGN. Used by preprocess.py only."""
@@ -152,20 +130,10 @@ def parse_pgn(file_path, sequence_length=10):
                        None, best_move, None, (from_idx, to_idx))
                 board.push(move)
 
-
-# ---------------------------------------------------------------------------
 # Dataset
-# ---------------------------------------------------------------------------
 
 class ChunkDataset(torch.utils.data.IterableDataset):
-    """
-    IterableDataset over pre-processed .npz chunk files.
-    Sequential chunk loading — no disk thrashing.
-
-    NOTE: preprocess.py must be re-run after adding the flip fix, because
-    the board tensors and square indices stored in existing chunks were
-    computed without flipping for Black. The chunks need to be regenerated.
-    """
+    """Streams .npz chunk files sequentially — no random-access disk thrashing."""
     def __init__(self, chunk_dir, shuffle=True):
         self.chunk_paths = sorted(glob.glob(os.path.join(chunk_dir, 'chunk_*.npz')))
         if not self.chunk_paths:
@@ -198,19 +166,10 @@ class ChunkDataset(torch.utils.data.IterableDataset):
                 t_sq  = torch.tensor(to_sq[i],   dtype=torch.long)
                 yield board, move, f_sq, t_sq
 
-
-# ---------------------------------------------------------------------------
 # Model
-# ---------------------------------------------------------------------------
 
 class ChessModel(nn.Module):
-    """
-    CNN + LSTM chess move prediction model with two output heads.
-
-    Dropout removed per ConvChess paper finding: chess boards are small
-    and sparse, so all features are interdependent. Dropout destroys
-    crucial piece relationship signals and consistently hurts accuracy.
-    """
+    """CNN (board) + LSTM (move history) → two 64-class heads (from-square, to-square)."""
     def __init__(self):
         super().__init__()
         self.cnn = nn.Sequential(
@@ -238,10 +197,7 @@ class ChessModel(nn.Module):
         z = self.fc(combined)
         return self.from_head(z), self.to_head(z)
 
-
-# ---------------------------------------------------------------------------
 # Training
-# ---------------------------------------------------------------------------
 
 def train_one_epoch(model, loader, optimizer, scaler, criterion, device):
     model.train()
@@ -265,7 +221,6 @@ def train_one_epoch(model, loader, optimizer, scaler, criterion, device):
         total        += n
     return total_loss / total, from_correct / total, to_correct / total
 
-
 @torch.no_grad()
 def evaluate(model, loader, criterion, device):
     model.eval()
@@ -284,7 +239,6 @@ def evaluate(model, loader, criterion, device):
         to_correct   += (to_logits.argmax(1)   == to_sq).sum().item()
         total        += n
     return total_loss / total, from_correct / total, to_correct / total
-
 
 def main():
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
@@ -343,7 +297,6 @@ def main():
                 break
 
     print(f"\nTraining complete. Best model saved to: {MODEL_PATH}")
-
 
 if __name__ == '__main__':
     main()

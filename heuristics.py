@@ -1,13 +1,8 @@
-"""
-heuristics.py — Piece-square evaluation tables.
-
-"""
+"""Piece-square evaluation tables with endgame awareness."""
 
 import chess
 
-# ---------------------------------------------------------------------------
 # Middlegame piece-square tables
-# ---------------------------------------------------------------------------
 
 pawnEvalWhite = (
     (0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0),
@@ -80,10 +75,8 @@ kingEvalWhite = (
 )
 kingEvalBlack = tuple(reversed(kingEvalWhite))
 
-# ---------------------------------------------------------------------------
 # Endgame king table — king should centralize and chase pawns
 # Positive values in the center, penalize corners and edges
-# ---------------------------------------------------------------------------
 kingEndgameEval = (
     (-5.0, -4.0, -3.0, -2.0, -2.0, -3.0, -4.0, -5.0),
     (-4.0, -2.0,  0.0,  0.0,  0.0,  0.0, -2.0, -4.0),
@@ -95,19 +88,10 @@ kingEndgameEval = (
     (-5.0, -4.0, -3.0, -2.0, -2.0, -3.0, -4.0, -5.0),
 )
 
-
-# ---------------------------------------------------------------------------
 # Endgame detection
-# ---------------------------------------------------------------------------
 
 def is_endgame(board: chess.Board) -> bool:
-    """
-    Detect endgame phase. True when:
-      - Both sides have no queens, OR
-      - Both sides have queens but very little other material (rooks gone)
-
-    This triggers the endgame king table and passed pawn bonuses.
-    """
+    """True when queens are gone or material is very low — triggers endgame evaluation."""
     white_queens = len(board.pieces(chess.QUEEN,  chess.WHITE))
     black_queens = len(board.pieces(chess.QUEEN,  chess.BLACK))
     white_rooks  = len(board.pieces(chess.ROOK,   chess.WHITE))
@@ -129,12 +113,8 @@ def is_endgame(board: chess.Board) -> bool:
 
     return False
 
-
 def get_search_depth(board: chess.Board) -> int:
-    """
-    Adaptive search depth based on game phase.
-    Endgame trees are much smaller so we can search deeper for free.
-    """
+    """Deeper search in endgame (fewer pieces = smaller tree)."""
     pieces = len(board.piece_map())
     if pieces > 20:
         return 2   # opening/middlegame — stay fast
@@ -143,17 +123,11 @@ def get_search_depth(board: chess.Board) -> int:
     else:
         return 4   # endgame — few pieces, deeper is cheap
 
-
-# ---------------------------------------------------------------------------
 # Passed pawn helpers
-# ---------------------------------------------------------------------------
 
 def _is_passed_pawn(board: chess.Board, square: chess.Square,
                     color: chess.Color) -> bool:
-    """
-    A pawn is passed if no opposing pawn can ever block or capture it —
-    i.e. no opposing pawn on the same file or adjacent files ahead of it.
-    """
+    """True if no opposing pawn can block or capture this pawn on its path to promotion."""
     file = chess.square_file(square)
     rank = chess.square_rank(square)
 
@@ -174,53 +148,30 @@ def _is_passed_pawn(board: chess.Board, square: chess.Square,
                 return False
     return True
 
-
 def _passed_pawn_bonus(rank: int, color: chess.Color) -> float:
-    """
-    Bonus for a passed pawn based on how advanced it is.
-    The closer to promotion, the more valuable.
-    """
+    """Bonus that scales with how far advanced the passed pawn is."""
     if color == chess.WHITE:
         advance = rank  # rank 6 = one step from promotion
     else:
         advance = 7 - rank
-    # Scale: rank 1=0.5, rank 2=1.0, rank 3=2.0, rank 4=3.5, rank 5=5.0, rank 6=8.0
     bonuses = (0.0, 0.5, 1.0, 2.0, 3.5, 5.0, 8.0, 0.0)
     return bonuses[advance]
 
-
 def _king_pawn_proximity(king_sq: chess.Square,
                          pawn_sq: chess.Square) -> float:
-    """
-    Bonus for the king being close to a passed pawn in the endgame.
-    Chebyshev distance — king can move diagonally.
-    Max bonus when adjacent, zero when far away.
-    """
+    """Chebyshev distance bonus — reward king for being close to a passed pawn."""
     kf, kr = chess.square_file(king_sq), chess.square_rank(king_sq)
     pf, pr = chess.square_file(pawn_sq), chess.square_rank(pawn_sq)
     dist   = max(abs(kf - pf), abs(kr - pr))
     return max(0.0, 4.0 - dist)  # 4.0 adjacent, 3.0 one away, ...
 
-
-# ---------------------------------------------------------------------------
 # Main evaluation function
-# ---------------------------------------------------------------------------
 
 def evaluate(board_array, chess_board: chess.Board = None) -> float:
-    """
-    Evaluate the board position. Returns a score from White's perspective
-    (positive = good for White, negative = good for Black).
-
-    Args:
-        board_array  : [[white_pieces], [black_pieces]] in (x, y, type) format
-                       as produced by chess_player.evaluate_helper()
-        chess_board  : optional chess.Board for endgame features.
-                       If None, uses middlegame tables only (backward compatible).
-    """
+    """Score from White's perspective. Pass chess_board to enable endgame features."""
     endgame = is_endgame(chess_board) if chess_board is not None else False
     score   = 0.0
 
-    # --- White pieces ---
     for x, y, piece in board_array[0]:
         if piece == "p":
             score += 1 + pawnEvalWhite[y - 1][x - 1]
@@ -239,7 +190,6 @@ def evaluate(board_array, chess_board: chess.Board = None) -> float:
             else:
                 score += kingEvalWhite[y - 1][x - 1]
 
-    # --- Black pieces ---
     for x, y, piece in board_array[1]:
         if piece == "p":
             score -= 1 + pawnEvalBlack[y - 1][x - 1]
@@ -258,21 +208,17 @@ def evaluate(board_array, chess_board: chess.Board = None) -> float:
             else:
                 score -= kingEvalBlack[y - 1][x - 1]
 
-    # --- Endgame bonus features ---
     if endgame and chess_board is not None:
 
         white_king_sq = chess_board.king(chess.WHITE)
         black_king_sq = chess_board.king(chess.BLACK)
 
-        # Passed pawn bonuses + king proximity
         for sq in chess_board.pieces(chess.PAWN, chess.WHITE):
             if _is_passed_pawn(chess_board, sq, chess.WHITE):
                 rank  = chess.square_rank(sq)
                 score += _passed_pawn_bonus(rank, chess.WHITE)
-                # Bonus for own king supporting the passer
                 if white_king_sq is not None:
                     score += 0.3 * _king_pawn_proximity(white_king_sq, sq)
-                # Penalty when enemy king is close to our passer (blocking it)
                 if black_king_sq is not None:
                     score -= 0.2 * _king_pawn_proximity(black_king_sq, sq)
 
@@ -285,8 +231,6 @@ def evaluate(board_array, chess_board: chess.Board = None) -> float:
                 if white_king_sq is not None:
                     score += 0.2 * _king_pawn_proximity(white_king_sq, sq)
 
-        # Bonus for having more pawns in pure king+pawn endgames
-        # (material advantage is more decisive when there's nothing else)
         only_kings_and_pawns = all(
             p.piece_type in (chess.KING, chess.PAWN)
             for p in chess_board.piece_map().values()

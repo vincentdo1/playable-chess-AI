@@ -16,7 +16,6 @@ from neural_network import (ChessModel, fen_to_tensor, move_sequence_to_vector,
 import heuristics
 import chess_player
 
-
 def load_trained_model(path: str = MODEL_PATH) -> ChessModel:
     """Load a saved ChessModel from a .pt checkpoint file."""
     checkpoint = torch.load(path, map_location=DEVICE)
@@ -26,7 +25,6 @@ def load_trained_model(path: str = MODEL_PATH) -> ChessModel:
     print(f"Model loaded from {path}")
     print(f"  Saved at epoch {checkpoint['epoch']}  |  val_loss={checkpoint['val_loss']:.4f}")
     return model
-
 
 def _get_move_scores(model: ChessModel, board: chess.Board):
     """
@@ -61,7 +59,6 @@ def _get_move_scores(model: ChessModel, board: chess.Board):
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored
 
-
 def predict_next_move(model: ChessModel, board: chess.Board,
                       temperature: float = 1.2) -> str | None:
     """
@@ -93,35 +90,12 @@ def predict_next_move(model: ChessModel, board: chess.Board,
     chosen = np.random.choice(len(moves), p=probs)
     return moves[chosen].uci()
 
-
 def predict_next_move_with_search(model: ChessModel, board: chess.Board,
                                   top_n: int = 5,
                                   depth: int = 2) -> str | None:
     """
-    Hybrid prediction: neural network narrows candidates, alphabeta picks the best.
-
-    How it works:
-      1. The neural network scores all legal moves and picks the top_n most
-         Magnus-like candidates. This keeps the style in the opening while
-         reducing the search space dramatically.
-      2. Alphabeta searches each candidate to the given depth, evaluating
-         consequences using the heuristic evaluation function.
-      3. The move with the best search score is returned.
-
-    Args:
-        model  : trained ChessModel
-        board  : current board position
-        top_n  : how many NN candidates to search (5 is a good balance —
-                 more candidates = more tactical coverage but slower)
-        depth  : alphabeta search depth (2 = fast, 3 = stronger but slower,
-                 4 = slow, only use in endgame with few pieces)
-
-    Returns the predicted move as a UCI string.
-
-    Why this works better than pure NN in the middlegame:
-      The NN learned what Magnus played, but has no concept of consequences.
-      Alphabeta explicitly evaluates future positions, so it avoids blunders
-      like hanging pieces — the most common failure mode of the pure NN.
+    Hybrid: NN picks top_n candidates, alphabeta searches them for the best.
+    Preserves Magnus style while avoiding tactical blunders.
     """
     legal_moves = list(board.legal_moves)
     if not legal_moves:
@@ -155,18 +129,10 @@ def predict_next_move_with_search(model: ChessModel, board: chess.Board,
 
     return best_move.uci()
 
-
 def _evaluate_board(board: chess.Board) -> float:
-    """
-    Evaluate the board from the perspective of the side to move.
-    Positive = good for the side to move, negative = bad.
-    Wraps chess_player.evaluate_helper + heuristics.evaluate.
-    """
-    # evaluate() returns score from White's perspective —
-    # flip sign if it's Black's turn so it's always "higher = better for me"
-    return heuristics.evaluate(chess_player.evaluate_helper(board), board)
-
-
+    """Score from the perspective of the side to move (positive = good for me)."""
+    raw = heuristics.evaluate(chess_player.evaluate_helper(board), board)
+    return raw if board.turn == chess.WHITE else -raw
 
 def _alphabeta_search(board: chess.Board, depth: int,
                       alpha: float, beta: float) -> float:
@@ -195,7 +161,6 @@ def _alphabeta_search(board: chess.Board, depth: int,
         if alpha >= beta:
             break
     return best
-
 
 if __name__ == '__main__':
     print("Loading model...")
