@@ -108,7 +108,7 @@ class ChessGame:
 
         elif current == "magnus_carlsen":
             if self._magnus_model is not None:
-                uci = self._predict_fn(self._magnus_model, self.board)
+                uci = self._predict_fn(self._magnus_model, self.board, top_n=10, depth=4)
                 ai_move = chess.Move.from_uci(uci) if uci else chess_player.random_move_player(self.board)
             else:
                 ai_move = chess_player.random_move_player(self.board)

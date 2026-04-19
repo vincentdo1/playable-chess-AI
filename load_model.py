@@ -53,8 +53,9 @@ def _get_move_scores(model: ChessModel, board: chess.Board):
     for move in board.legal_moves:
         from_sq = flip_square(move.from_square) if is_black else move.from_square
         to_sq   = flip_square(move.to_square)   if is_black else move.to_square
-        score   = float(from_probs[from_sq]) * float(to_probs[to_sq])
-        scored.append((score, move))
+        # Log-space: sum of log-probs instead of product of probs
+        log_score = math.log(from_probs[from_sq] + 1e-9) + math.log(to_probs[to_sq] + 1e-9)
+        scored.append((log_score, move))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored
@@ -75,18 +76,17 @@ def predict_next_move(model: ChessModel, board: chess.Board,
         return None
 
     scored = _get_move_scores(model, board)
-    scores = np.array([s for s, _ in scored])
+    log_scores = np.array([s for s, _ in scored])
     moves  = [m for _, m in scored]
 
     if temperature == 0.0:
         return moves[0].uci()
 
-    scores = np.power(scores, 1.0 / temperature)
-    total  = scores.sum()
-    if total == 0:
-        return np.random.choice(moves).uci()
+    log_scores = log_scores / temperature
+    log_scores -= log_scores.max()   # subtract max for stability
+    probs = np.exp(log_scores)
+    probs /= probs.sum()
 
-    probs  = scores / total
     chosen = np.random.choice(len(moves), p=probs)
     return moves[chosen].uci()
 
@@ -112,20 +112,16 @@ def predict_next_move_with_search(model: ChessModel, board: chess.Board,
     # Step 2 — alphabeta search over candidates
     best_move  = candidates[0]
     best_eval  = float('-inf')
-    side       = board.turn  # True = White, False = Black
+    alpha = float('-inf') 
 
     for move in candidates:
         board.push(move)
-        # Search from opponent's perspective (negamax style)
-        eval_score = -_alphabeta_search(
-            board, depth - 1,
-            float('-inf'), float('inf')
-        )
+        eval_score = -_alphabeta_search(board, depth - 1, -float('inf'), -alpha)  # pass alpha
         board.pop()
-
         if eval_score > best_eval:
             best_eval = eval_score
             best_move = move
+            alpha = best_eval
 
     return best_move.uci()
 
