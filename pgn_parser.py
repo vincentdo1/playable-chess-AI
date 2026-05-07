@@ -1,7 +1,12 @@
+import os
 import chess
 import chess.pgn
-import sys
 import chess.engine
+
+STOCKFISH_PATH = os.environ.get(
+    'STOCKFISH_PATH',
+    'stockfish.exe'
+)
 
 # Evaluates a board and returns CP and best move
 def stockfish_evaluation(board, engine, time_limit = 0.0001):
@@ -13,7 +18,7 @@ def pgn_parse(path_open, path_save):
     pgn = open(path_open)
     mygame=chess.pgn.read_game(pgn)
     num = 1
-    engine = chess.engine.SimpleEngine.popen_uci("C:/Users/vince/Downloads/scid_windows_5.0.2/scid_windows_x64/engines/stockfish.exe")
+    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
     f = open(path_save, "w")
 
     # Begin looping through every game

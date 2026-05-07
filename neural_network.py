@@ -97,39 +97,6 @@ def move_to_index(move, board):
         raise ValueError(f"Move {move.uci()} is not legal in this position.")
     return move.from_square, move.to_square
 
-def parse_pgn(file_path, sequence_length=10):
-    """Generator over annotated moves in a PGN. Used by preprocess.py only."""
-    with open(file_path) as pgn_file:
-        while True:
-            game = chess.pgn.read_game(pgn_file)
-            if game is None:
-                break
-            board = game.board()
-            recent_moves = []
-            for node in game.mainline():
-                move = node.move
-                is_black = (board.turn == chess.BLACK)
-                board_tensor = fen_to_tensor(board.fen(), flip=is_black)
-                recent_moves.append(move)
-                if len(recent_moves) > sequence_length:
-                    recent_moves.pop(0)
-                move_vector = move_to_vector(move, flip=is_black)
-                comment = node.comment
-                best_move_match = re.search(r'\[%best_move: ([^\]]+)\]', comment)
-                best_move = best_move_match.group(1) if best_move_match else None
-                if best_move is None:
-                    board.push(move)
-                    continue
-                bm = board.parse_uci(best_move)
-                from_idx, to_idx = move_to_index(bm, board)
-                # Flip target square indices when it's Black's turn
-                if is_black:
-                    from_idx = flip_square(from_idx)
-                    to_idx   = flip_square(to_idx)
-                yield (board_tensor, recent_moves, move_vector,
-                       None, best_move, None, (from_idx, to_idx))
-                board.push(move)
-
 # Dataset
 
 class ChunkDataset(torch.utils.data.IterableDataset):

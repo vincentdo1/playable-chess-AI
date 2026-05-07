@@ -139,9 +139,8 @@ def _alphabeta_search(board: chess.Board, depth: int,
     """
     if board.is_checkmate():
         return -10000 + depth
-    if board.is_repetition(2):
-        raw = _evaluate_board(board)
-        return -50 if raw > 0 else 50
+    if board.is_repetition(3):
+        return 0
     if board.is_stalemate() or board.is_insufficient_material():
         return 0
     if depth == 0:

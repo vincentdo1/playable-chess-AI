@@ -64,7 +64,7 @@ def get_move():
     if player == 'magnus':
         if _magnus_model is None:
             return jsonify({'error': 'Magnus model is not loaded on this server'}), 503
-        uci = _predict_fn(_magnus_model, board)
+        uci = _predict_fn(_magnus_model, board, top_n=10, depth=4)
         if uci is None:
             return jsonify({'error': 'Magnus model returned no move'}), 500
         return jsonify({'move': uci, 'player': 'magnus'})

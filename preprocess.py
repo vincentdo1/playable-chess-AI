@@ -93,10 +93,6 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
                 is_black = (board.turn == chess.BLACK)
                 board_tensor = fen_to_tensor(board.fen(), flip=is_black)
 
-                recent_moves.append(move)
-                if len(recent_moves) > sequence_length:
-                    recent_moves.pop(0)
-
                 if best_move is not None:
                     try:
                         from_idx, to_idx = move_to_index(board.parse_uci(best_move), board)
@@ -113,6 +109,10 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
                     except ValueError:
                         pass  # skip rare illegal annotations
 
+                recent_moves.append(move)
+                if len(recent_moves) > sequence_length:
+                    recent_moves.pop(0)
+                    
                 board.push(move)
 
                 if len(boards_buf) >= chunk_size:
