@@ -2,15 +2,16 @@ import unittest
 import numpy as np
 import sys, os
 sys.path.append(os.path.abspath(os.path.join('..', 'playable-chess-AI')))
-from neural_network import fen_to_tensor
+from neural_network import BOARD_CHANNELS, fen_to_tensor
 
-initial_position_tensor = np.zeros((8, 8, 16), dtype=np.float32)
+initial_position_tensor = np.zeros((8, 8, BOARD_CHANNELS), dtype=np.float32)
 
 # Mapping of pieces to their corresponding indices in the tensor
 piece_to_index = {
     'p': 0, 'n': 1, 'b': 2, 'r': 3, 'q': 4, 'k': 5,  # Black pieces
     'R': 9, 'N': 7, 'B': 8, 'Q': 10, 'K': 11, 'P': 6, # White pieces
-    'ck': 12, 'cq': 13, 'CK': 14, 'CQ': 15           # Castling rights
+    'ck': 12, 'cq': 13, 'CK': 14, 'CQ': 15,           # Castling rights
+    'ep': 16                                          # En-passant target
 }
 
 # Set the pieces on the board
@@ -43,10 +44,10 @@ initial_position_tensor[:, :, piece_to_index['CK']] = 1  # White kingside
 initial_position_tensor[:, :, piece_to_index['CQ']] = 1  # White queenside
 
 
-specific_position_tensor = np.zeros((8, 8, 16), dtype=np.float32)
+specific_position_tensor = np.zeros((8, 8, BOARD_CHANNELS), dtype=np.float32)
 specific_position_tensor[4, 3, piece_to_index['q']] = 1
 
-custom_position_tensor = np.zeros((8, 8, 16), dtype=np.float32)
+custom_position_tensor = np.zeros((8, 8, BOARD_CHANNELS), dtype=np.float32)
 
 # Black pieces
 custom_position_tensor[0, 0, piece_to_index['r']] = 1  # Black rook
@@ -82,7 +83,7 @@ custom_position_tensor[7, 7, piece_to_index['K']] = 1  # White king
 custom_position_tensor[:, :, piece_to_index['ck']] = 1
 custom_position_tensor[:, :, piece_to_index['cq']] = 1
 
-complex_position_tensor = np.zeros((8, 8, 16), dtype=np.float32)
+complex_position_tensor = np.zeros((8, 8, BOARD_CHANNELS), dtype=np.float32)
 
 # Black pieces
 complex_position_tensor[7, 0, piece_to_index['r']] = 1  # Black rook
@@ -204,6 +205,20 @@ class TestFenToTensor(unittest.TestCase):
         print(tensor_to_fen_corrected(expected_output))
         print(tensor_to_fen_corrected(tensor))
         np.testing.assert_array_equal(tensor, expected_output)
+
+    def test_en_passant_target(self):
+        fen = "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3"
+        tensor = fen_to_tensor(fen)
+        self.assertEqual(tensor.shape, (8, 8, BOARD_CHANNELS))
+        self.assertEqual(tensor[5, 3, piece_to_index['ep']], 1)
+        self.assertEqual(np.sum(tensor[:, :, piece_to_index['ep']]), 1)
+
+    def test_flipped_en_passant_target(self):
+        fen = "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3"
+        tensor = fen_to_tensor(fen, flip=True)
+        self.assertEqual(tensor.shape, (8, 8, BOARD_CHANNELS))
+        self.assertEqual(tensor[2, 4, piece_to_index['ep']], 1)
+        self.assertEqual(np.sum(tensor[:, :, piece_to_index['ep']]), 1)
 
 if __name__ == '__main__':
     unittest.main()

@@ -3,16 +3,15 @@ load_model.py — Load a trained ChessModel and predict the next move.
 
 Two prediction modes:
   predict_next_move            — pure neural network (fast, Magnus-style)
-  predict_next_move_with_search — NN candidates + alphabeta search (to improve model strength)
+  predict_next_move_with_search — optional NN candidates + alphabeta search benchmark
 """
 
-import math
 import numpy as np
 import torch
 import chess
 
 from neural_network import (ChessModel, fen_to_tensor, move_sequence_to_vector,
-                             flip_square, MODEL_PATH, DEVICE)
+                             move_to_policy_index, MODEL_PATH, DEVICE)
 import heuristics
 import chess_player
 
@@ -31,31 +30,25 @@ def _get_move_scores(model: ChessModel, board: chess.Board):
     Run the neural network and return a score for every legal move.
 
     Returns a list of (score, move) tuples sorted highest score first.
-    Scores are computed by multiplying the from-square and to-square
-    probabilities, with board flipping applied for Black.
+    Scores are fixed move-policy logits, with board flipping applied for Black.
     """
     is_black = (board.turn == chess.BLACK)
 
     board_tensor = fen_to_tensor(board.fen(), flip=is_black)
     move_seq     = move_sequence_to_vector(list(board.move_stack[-10:]),
                                            max_length=10, flip=is_black)
+    model_device = next(model.parameters()).device
 
-    board_t = torch.tensor(board_tensor, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(DEVICE)
-    move_t  = torch.tensor(move_seq,    dtype=torch.float32).unsqueeze(0).to(DEVICE)
+    board_t = torch.tensor(board_tensor, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(model_device)
+    move_t  = torch.tensor(move_seq,    dtype=torch.float32).unsqueeze(0).to(model_device)
 
     with torch.no_grad():
-        from_logits, to_logits = model(board_t, move_t)
-
-    from_probs = torch.softmax(from_logits[0], dim=0).cpu().numpy()
-    to_probs   = torch.softmax(to_logits[0],   dim=0).cpu().numpy()
+        policy_logits = model(board_t, move_t)
 
     scored = []
     for move in board.legal_moves:
-        from_sq = flip_square(move.from_square) if is_black else move.from_square
-        to_sq   = flip_square(move.to_square)   if is_black else move.to_square
-        # Log-space: sum of log-probs instead of product of probs
-        log_score = math.log(from_probs[from_sq] + 1e-9) + math.log(to_probs[to_sq] + 1e-9)
-        scored.append((log_score, move))
+        move_idx = move_to_policy_index(move, flip=is_black)
+        scored.append((policy_logits[0, move_idx].item(), move))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored
@@ -163,10 +156,10 @@ if __name__ == '__main__':
 
     board = chess.Board()
 
-    print("\n--- Pure NN prediction (opening) ---")
-    move = predict_next_move(model, board)
+    print("\n--- Pure NN prediction (deterministic) ---")
+    move = predict_next_move(model, board, temperature=0.0)
     print(f"Predicted first move: {move}")
 
-    print("\n--- NN + search prediction (depth=2, top 5 candidates) ---")
-    move = predict_next_move_with_search(model, board, top_n=5, depth=2)
+    print("\n--- Pure NN prediction (sampled) ---")
+    move = predict_next_move(model, board, temperature=1.2)
     print(f"Predicted first move: {move}")

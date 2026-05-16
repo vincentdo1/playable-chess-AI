@@ -13,7 +13,9 @@ def stockfish_evaluation(board, engine, time_limit = 0.0001):
     result = engine.analyse(board, chess.engine.Limit(time=time_limit))
     return result['score'].white(), result['pv'][0]
     
-# Reads PGN file and adds evaluation, best move, and if best move was played for every move
+# Reads a PGN file and adds Stockfish analysis for every move.
+# These annotations are for analysis only; preprocessing trains on the move
+# actually played in the PGN.
 def pgn_parse(path_open, path_save):
     pgn = open(path_open)
     mygame=chess.pgn.read_game(pgn)

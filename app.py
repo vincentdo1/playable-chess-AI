@@ -1,4 +1,4 @@
-"""Flask backend — serves alphabeta and Magnus Carlsen moves. Stockfish runs client-side."""
+"""Flask backend - serves alphabeta and Magnus Carlsen moves. Stockfish runs client-side."""
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -11,9 +11,10 @@ CORS(app)
 
 _magnus_model = None
 _predict_fn   = None
+DEFAULT_MAGNUS_TEMPERATURE = float(os.environ.get('MAGNUS_TEMPERATURE', '1.2'))
 
 try:
-    from load_model import load_trained_model, predict_next_move_with_search as predict_next_move
+    from load_model import load_trained_model, predict_next_move
     _magnus_model = load_trained_model()
     _predict_fn   = predict_next_move
     print("Magnus Carlsen model loaded.")
@@ -35,7 +36,7 @@ def health():
 
 @app.route('/api/move', methods=['POST'])
 def get_move():
-    """POST {fen, player, depth?} → {move, player}. player is 'alphabeta' or 'magnus'."""
+    """POST {fen, player, depth?, temperature?} -> {move, player}."""
     data = request.get_json(silent=True)
     if not data:
         return jsonify({'error': 'JSON body required'}), 400
@@ -64,10 +65,16 @@ def get_move():
     if player == 'magnus':
         if _magnus_model is None:
             return jsonify({'error': 'Magnus model is not loaded on this server'}), 503
-        uci = _predict_fn(_magnus_model, board, top_n=10, depth=4)
+        try:
+            temperature = float(data.get('temperature', DEFAULT_MAGNUS_TEMPERATURE))
+        except (TypeError, ValueError):
+            return jsonify({'error': "'temperature' must be a number"}), 400
+        temperature = max(0.0, min(temperature, 3.0))
+
+        uci = _predict_fn(_magnus_model, board, temperature=temperature)
         if uci is None:
             return jsonify({'error': 'Magnus model returned no move'}), 500
-        return jsonify({'move': uci, 'player': 'magnus'})
+        return jsonify({'move': uci, 'player': 'magnus', 'temperature': temperature})
 
     return jsonify({'error': f"Unknown player: '{player}'"}), 400
 
