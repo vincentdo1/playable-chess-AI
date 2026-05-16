@@ -3,7 +3,7 @@ import numpy as np
 import sys, os
 import chess
 sys.path.append(os.path.abspath(os.path.join('..', 'playable-chess-AI')))
-from neural_network import move_sequence_to_vector, square_to_index
+from neural_network import move_sequence_to_vector
 
 class TestMoveSequenceToVector(unittest.TestCase):
     def test_standard_move_sequence(self):
@@ -18,8 +18,8 @@ class TestMoveSequenceToVector(unittest.TestCase):
         move_sequence = [chess.Move.from_uci('e7e8q')]  # Pawn promotion to queen
         sequence_vector = move_sequence_to_vector(move_sequence)
         self.assertEqual(sequence_vector.shape, (10, 132))
-        self.assertEqual(sequence_vector[0][square_to_index('e7')], 1)
-        self.assertEqual(sequence_vector[0][64 + square_to_index('e8')], 1)
+        self.assertEqual(sequence_vector[0][chess.E7], 1)
+        self.assertEqual(sequence_vector[0][64 + chess.E8], 1)
         self.assertEqual(sequence_vector[0][131], 1)  # Index for queen promotion
 
     def test_mixed_move_sequence(self):
@@ -27,8 +27,8 @@ class TestMoveSequenceToVector(unittest.TestCase):
         sequence_vector = move_sequence_to_vector(move_sequence)
         self.assertEqual(sequence_vector.shape, (10, 132))
         self.assertEqual(np.sum(sequence_vector[0]), 2)
-        self.assertEqual(sequence_vector[1][square_to_index('e7')], 1)
-        self.assertEqual(sequence_vector[1][64 + square_to_index('e8')], 1)
+        self.assertEqual(sequence_vector[1][chess.E7], 1)
+        self.assertEqual(sequence_vector[1][64 + chess.E8], 1)
         self.assertEqual(sequence_vector[1][131], 1)  # Index for queen promotion
 
     def test_short_move_sequence(self):

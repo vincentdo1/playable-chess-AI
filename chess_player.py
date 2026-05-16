@@ -65,7 +65,7 @@ def random_move_player(board):
         return None
     return random.choice(legal_moves)
 
-def alphabeta(side, board, depth=None, alpha=-math.inf, beta=math.inf):
+def alphabeta(side, board, depth=None):
     """
     Top-level alphabeta call. If depth is None, uses adaptive depth
     from heuristics.get_search_depth() based on game phase.
@@ -100,9 +100,8 @@ def alphabetahelper(side, board, depth, alpha, beta):
             return -(10000 - depth)   # White is mated → bad for White
         else:
             return 10000 - depth      # Black is mated → great for White
-    if board.is_repetition(2):
-        mat = heuristics.evaluate(evaluate_helper(board), board)
-        return -50 if mat > 0 else 50
+    if board.is_repetition(3):
+        return 0
     if board.is_stalemate() or board.is_insufficient_material():
         return 0
     if depth == 0:

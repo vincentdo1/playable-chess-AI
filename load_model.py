@@ -1,20 +1,11 @@
-"""
-load_model.py — Load a trained ChessModel and predict the next move.
+"""Load a trained ChessModel and predict the next move."""
 
-Two prediction modes:
-  predict_next_move            — pure neural network (fast, Magnus-style)
-  predict_next_move_with_search — NN candidates + alphabeta search (to improve model strength)
-"""
-
-import math
 import numpy as np
 import torch
 import chess
 
 from neural_network import (ChessModel, fen_to_tensor, move_sequence_to_vector,
-                             flip_square, MODEL_PATH, DEVICE)
-import heuristics
-import chess_player
+                             move_to_policy_index, MODEL_PATH, DEVICE)
 
 def load_trained_model(path: str = MODEL_PATH) -> ChessModel:
     """Load a saved ChessModel from a .pt checkpoint file."""
@@ -31,31 +22,25 @@ def _get_move_scores(model: ChessModel, board: chess.Board):
     Run the neural network and return a score for every legal move.
 
     Returns a list of (score, move) tuples sorted highest score first.
-    Scores are computed by multiplying the from-square and to-square
-    probabilities, with board flipping applied for Black.
+    Scores are fixed move-policy logits, with board flipping applied for Black.
     """
     is_black = (board.turn == chess.BLACK)
 
     board_tensor = fen_to_tensor(board.fen(), flip=is_black)
     move_seq     = move_sequence_to_vector(list(board.move_stack[-10:]),
                                            max_length=10, flip=is_black)
+    model_device = next(model.parameters()).device
 
-    board_t = torch.tensor(board_tensor, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(DEVICE)
-    move_t  = torch.tensor(move_seq,    dtype=torch.float32).unsqueeze(0).to(DEVICE)
+    board_t = torch.tensor(board_tensor, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(model_device)
+    move_t  = torch.tensor(move_seq,    dtype=torch.float32).unsqueeze(0).to(model_device)
 
     with torch.no_grad():
-        from_logits, to_logits = model(board_t, move_t)
-
-    from_probs = torch.softmax(from_logits[0], dim=0).cpu().numpy()
-    to_probs   = torch.softmax(to_logits[0],   dim=0).cpu().numpy()
+        policy_logits = model(board_t, move_t)
 
     scored = []
     for move in board.legal_moves:
-        from_sq = flip_square(move.from_square) if is_black else move.from_square
-        to_sq   = flip_square(move.to_square)   if is_black else move.to_square
-        # Log-space: sum of log-probs instead of product of probs
-        log_score = math.log(from_probs[from_sq] + 1e-9) + math.log(to_probs[to_sq] + 1e-9)
-        scored.append((log_score, move))
+        move_idx = move_to_policy_index(move, flip=is_black)
+        scored.append((policy_logits[0, move_idx].item(), move))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored
@@ -90,84 +75,16 @@ def predict_next_move(model: ChessModel, board: chess.Board,
     chosen = np.random.choice(len(moves), p=probs)
     return moves[chosen].uci()
 
-def predict_next_move_with_search(model: ChessModel, board: chess.Board,
-                                  top_n: int = 5,
-                                  depth: int = 2) -> str | None:
-    """
-    Hybrid: NN picks top_n candidates, alphabeta searches them for the best.
-    Preserves Magnus style while avoiding tactical blunders.
-    """
-    legal_moves = list(board.legal_moves)
-    if not legal_moves:
-        return None
-
-    # Step 1 — get top_n NN candidates
-    scored = _get_move_scores(model, board)
-    candidates = [move for _, move in scored[:top_n]]
-
-    # If only one legal move, return it immediately
-    if len(candidates) == 1:
-        return candidates[0].uci()
-
-    # Step 2 — alphabeta search over candidates
-    best_move  = candidates[0]
-    best_eval  = float('-inf')
-    alpha = float('-inf') 
-
-    for move in candidates:
-        board.push(move)
-        eval_score = -_alphabeta_search(board, depth - 1, -float('inf'), -alpha)  # pass alpha
-        board.pop()
-        if eval_score > best_eval:
-            best_eval = eval_score
-            best_move = move
-            alpha = best_eval
-
-    return best_move.uci()
-
-def _evaluate_board(board: chess.Board) -> float:
-    """Score from the perspective of the side to move (positive = good for me)."""
-    raw = heuristics.evaluate(chess_player.evaluate_helper(board), board)
-    return raw if board.turn == chess.WHITE else -raw
-
-def _alphabeta_search(board: chess.Board, depth: int,
-                      alpha: float, beta: float) -> float:
-    """
-    Standard alphabeta search returning score from the perspective of
-    the side to move at this node. Used internally by
-    predict_next_move_with_search.
-    """
-    if board.is_checkmate():
-        return -10000 + depth
-    if board.is_repetition(2):
-        raw = _evaluate_board(board)
-        return -50 if raw > 0 else 50
-    if board.is_stalemate() or board.is_insufficient_material():
-        return 0
-    if depth == 0:
-        return _evaluate_board(board)
-
-    best = float('-inf')
-    for move in chess_player._order_moves(board):
-        board.push(move)
-        score = -_alphabeta_search(board, depth - 1, -beta, -alpha)
-        board.pop()
-        best  = max(best, score)
-        alpha = max(alpha, best)
-        if alpha >= beta:
-            break
-    return best
-
 if __name__ == '__main__':
     print("Loading model...")
     model = load_trained_model()
 
     board = chess.Board()
 
-    print("\n--- Pure NN prediction (opening) ---")
-    move = predict_next_move(model, board)
+    print("\n--- Pure NN prediction (deterministic) ---")
+    move = predict_next_move(model, board, temperature=0.0)
     print(f"Predicted first move: {move}")
 
-    print("\n--- NN + search prediction (depth=2, top 5 candidates) ---")
-    move = predict_next_move_with_search(model, board, top_n=5, depth=2)
+    print("\n--- Pure NN prediction (sampled) ---")
+    move = predict_next_move(model, board, temperature=1.2)
     print(f"Predicted first move: {move}")

@@ -6,7 +6,8 @@ import chess_player
 
 # Vincent Do, April 2026
 class ChessGame:
-    def __init__(self, white_player="you", black_player="random"):
+    def __init__(self, white_player="you", black_player="random",
+                 magnus_temperature=1.2):
         pygame.init()
         self.WINDOW_SIZE = 600
         self.screen = pygame.display.set_mode((self.WINDOW_SIZE, self.WINDOW_SIZE))
@@ -27,13 +28,14 @@ class ChessGame:
         self.ai_only = True if white_player != "you" and black_player != "you" else False
         self.white_player = white_player
         self.black_player = black_player
+        self.magnus_temperature = magnus_temperature
 
         # Load Magnus model lazily — only when actually needed.
         self._magnus_model = None
         self._predict_fn   = None
         if white_player == "magnus_carlsen" or black_player == "magnus_carlsen":
             try:
-                from load_model import load_trained_model, predict_next_move_with_search as predict_next_move
+                from load_model import load_trained_model, predict_next_move
                 self._magnus_model = load_trained_model()
                 self._predict_fn   = predict_next_move
             except Exception as e:
@@ -108,7 +110,11 @@ class ChessGame:
 
         elif current == "magnus_carlsen":
             if self._magnus_model is not None:
-                uci = self._predict_fn(self._magnus_model, self.board, top_n=10, depth=4)
+                uci = self._predict_fn(
+                    self._magnus_model,
+                    self.board,
+                    temperature=self.magnus_temperature,
+                )
                 ai_move = chess.Move.from_uci(uci) if uci else chess_player.random_move_player(self.board)
             else:
                 ai_move = chess_player.random_move_player(self.board)
@@ -137,8 +143,12 @@ def main():
                         choices=('random', 'you', 'engine', 'alphabeta', 'magnus_carlsen'))
     parser.add_argument('--black_player', default='you',
                         choices=('random', 'you', 'engine', 'alphabeta', 'magnus_carlsen'))
+    parser.add_argument('--magnus_temperature', type=float, default=1.2,
+                        help='Sampling temperature for the Magnus NN. 0 is deterministic.')
     args = parser.parse_args()
-    application = ChessGame(args.white_player, args.black_player)
+    magnus_temperature = max(0.0, min(args.magnus_temperature, 3.0))
+    application = ChessGame(args.white_player, args.black_player,
+                            magnus_temperature)
     application.run()
 
 

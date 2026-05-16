@@ -176,13 +176,13 @@ def evaluate(board_array, chess_board: chess.Board = None) -> float:
         if piece == "p":
             score += 1 + pawnEvalWhite[y - 1][x - 1]
         elif piece == "b":
-            score += 9 + bishopEvalWhite[y - 1][x - 1]
+            score += 3.3 + bishopEvalWhite[y - 1][x - 1]     
         elif piece == "n":
-            score += 9 + knightEval[y - 1][x - 1]
+            score += 3.2 + knightEval[y - 1][x - 1]           
         elif piece == "r":
-            score += 14 + rookEvalWhite[y - 1][x - 1]
+            score += 5.0 + rookEvalWhite[y - 1][x - 1]         
         elif piece == "q":
-            score += 25 + queenEval[y - 1][x - 1]
+            score += 9.0 + queenEval[y - 1][x - 1] 
         elif piece == "k":
             score += 200
             if endgame:
@@ -194,13 +194,13 @@ def evaluate(board_array, chess_board: chess.Board = None) -> float:
         if piece == "p":
             score -= 1 + pawnEvalBlack[y - 1][x - 1]
         elif piece == "b":
-            score -= 9 + bishopEvalBlack[y - 1][x - 1]
+            score -= 3.3 + bishopEvalBlack[y - 1][x - 1]
         elif piece == "n":
-            score -= 9 + knightEval[y - 1][x - 1]
+            score -= 3.2 + knightEval[y - 1][x - 1]
         elif piece == "r":
-            score -= 14 + rookEvalBlack[y - 1][x - 1]
+            score -= 5.0 + rookEvalBlack[y - 1][x - 1]
         elif piece == "q":
-            score -= 25 + queenEval[y - 1][x - 1]
+            score -= 9.0 + queenEval[y - 1][x - 1]
         elif piece == "k":
             score -= 200
             if endgame:
