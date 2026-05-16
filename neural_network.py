@@ -2,12 +2,10 @@
 
 import os
 import glob
-import re
 import random
 
 import numpy as np
 import chess
-import chess.pgn
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -87,9 +85,6 @@ def fen_to_tensor(fen, flip: bool = False):
 
     return tensor
 
-def square_to_index(square):
-    return chess.parse_square(square.lower()[:2])
-
 def flip_square(sq: int) -> int:
     """Mirror a square index 180 degrees (a1=0 <-> h8=63)."""
     return 63 - sq
@@ -142,12 +137,6 @@ def move_sequence_to_vector(move_sequence, max_length=10, flip: bool = False):
     for i, move in enumerate(move_sequence[-max_length:]):
         seq[i] = move_to_vector(move, flip=flip)
     return seq
-
-def move_to_index(move, board):
-    """Return (from_sq, to_sq) as integers. Flipping is handled by the caller."""
-    if move not in board.legal_moves:
-        raise ValueError(f"Move {move.uci()} is not legal in this position.")
-    return move.from_square, move.to_square
 
 # Dataset
 

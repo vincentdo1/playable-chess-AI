@@ -66,9 +66,9 @@ set STOCKFISH_PATH=C:\path\to\stockfish.exe
 
 **Step 5 — Add the trained model**
 
-Place `grandmaster_model_v2.pt` in the `model/` folder:
+Place `grandmaster_model_policy_v1.pt` in the `model/` folder:
 ```
-model/grandmaster_model_v2.pt
+model/grandmaster_model_policy_v1.pt
 ```
 
 The model is not included in the repository due to its size. Contact the project owner or retrain using the instructions below.
@@ -118,6 +118,8 @@ python main.py --white_player random --black_player magnus_carlsen
 ### Step 1 — Preprocess PGN data (run once)
 
 Parses PGN files and saves positions as binary chunks for fast training. The model is trained on the move actually played in the PGN. If Stockfish annotations such as `[%best_move: ...]` are present, preprocessing reports how often the played move matched the engine top move and stores that as metadata, but it does not use Stockfish's move as the training label.
+
+By default, preprocessing reads `extractions/GM_games_2600.zip` and `extractions/magnus.zip`. Set `GM_ZIP` or `MAGNUS_ZIP` only if you want to use files somewhere else.
 
 Preprocessing also stores `cp_loss` and `sample_weight` metadata for each position when Stockfish is available. Set `STOCKFISH_PATH` if `stockfish.exe` is not in the project root. You can tune analysis with `CP_LOSS_TIME_LIMIT` or `CP_LOSS_DEPTH`, or set `CALCULATE_CP_LOSS=0` to skip this metadata pass.
 
@@ -203,13 +205,12 @@ playable-chess-AI/
 ├── load_model.py        — model loading and move prediction
 ├── preprocess.py        — PGN → .npz chunk conversion
 ├── heuristics.py        — piece-square tables and endgame evaluation
-├── pgn_parser.py        — PGN annotation with Stockfish evaluations
 ├── app.py               — Flask backend for web interface
 ├── index.html           — web interface (GitHub Pages)
 ├── stockfish.js         — Stockfish WebAssembly (for browser play)
 ├── pieces/              — chess piece PNG images
-├── extractions/         — raw PGN zip files (not in Git)
-└── data/                — training chunks and saved model (not in Git)
+├── model/               — saved PyTorch checkpoints
+└── data/                — generated training chunks (not in Git)
 ```
 
 ---

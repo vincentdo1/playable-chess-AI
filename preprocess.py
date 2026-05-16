@@ -16,13 +16,17 @@ import chess.engine
 import chess.pgn
 
 from neural_network import (
-    fen_to_tensor, legal_policy_indices, move_to_index, move_sequence_to_vector,
-    move_to_policy_index, flip_square
+    fen_to_tensor, legal_policy_indices, move_sequence_to_vector,
+    move_to_policy_index
 )
 
-# Config — edit paths to match your setup
-GM_ZIP = os.environ.get('GM_ZIP', 'C:/Users/Vincent/Downloads/GM_games_2600.zip')
-MAGNUS_ZIP = os.environ.get('MAGNUS_ZIP', 'C:/Users/Vincent/Downloads/magnus.zip')
+# Config. Environment variables can override these defaults.
+GM_ZIP = os.environ.get(
+    'GM_ZIP', os.path.join('extractions', 'GM_games_2600.zip')
+)
+MAGNUS_ZIP = os.environ.get(
+    'MAGNUS_ZIP', os.path.join('extractions', 'magnus.zip')
+)
 
 GM_EVAL_PGN = os.environ.get(
     'GM_EVAL_PGN', 'GM_games_eval.pgn'
@@ -216,7 +220,7 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    boards_buf, moves_buf, from_buf, to_buf, move_idx_buf = [], [], [], [], []
+    boards_buf, moves_buf, move_idx_buf = [], [], []
     fen_buf, played_uci_buf = [], []
     legal_indices_buf = []
     played_engine_best_buf, cp_loss_buf, sample_weight_buf = [], [], []
@@ -294,12 +298,10 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
                 board_tensor = fen_to_tensor(fen, flip=is_black)
 
                 try:
-                    from_idx, to_idx = move_to_index(move, board)
+                    if move not in board.legal_moves:
+                        raise ValueError
                     policy_idx = move_to_policy_index(move, flip=is_black)
                     legal_indices = legal_policy_indices(board, flip=is_black)
-                    if is_black:
-                        from_idx = flip_square(from_idx)
-                        to_idx   = flip_square(to_idx)
                     move_seq = move_sequence_to_vector(recent_moves, flip=is_black,
                                                        max_length=sequence_length)
                     cp_loss = _calculate_cp_loss(board, move, comment,
@@ -311,8 +313,6 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
 
                     boards_buf.append(board_tensor)
                     moves_buf.append(move_seq)
-                    from_buf.append(from_idx)
-                    to_buf.append(to_idx)
                     move_idx_buf.append(policy_idx)
                     fen_buf.append(fen)
                     played_uci_buf.append(move.uci())
@@ -332,13 +332,13 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
 
                 if len(boards_buf) >= chunk_size:
                     _save_chunk(output_dir, chunk_idx,
-                                boards_buf, moves_buf, from_buf, to_buf,
-                                move_idx_buf, legal_indices_buf,
+                                boards_buf, moves_buf, move_idx_buf,
+                                legal_indices_buf,
                                 fen_buf, played_uci_buf,
                                 played_engine_best_buf, cp_loss_buf,
                                 sample_weight_buf)
                     chunk_idx += 1
-                    boards_buf, moves_buf, from_buf, to_buf, move_idx_buf = [], [], [], [], []
+                    boards_buf, moves_buf, move_idx_buf = [], [], []
                     fen_buf, played_uci_buf = [], []
                     legal_indices_buf = []
                     played_engine_best_buf, cp_loss_buf, sample_weight_buf = [], [], []
@@ -354,8 +354,7 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
     # Flush remaining positions
     if boards_buf:
         _save_chunk(output_dir, chunk_idx,
-                    boards_buf, moves_buf, from_buf, to_buf,
-                    move_idx_buf, legal_indices_buf,
+                    boards_buf, moves_buf, move_idx_buf, legal_indices_buf,
                     fen_buf, played_uci_buf,
                     played_engine_best_buf, cp_loss_buf,
                     sample_weight_buf)
@@ -378,8 +377,8 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
 
     return total_pos, chunk_idx
 
-def _save_chunk(output_dir, chunk_idx, boards, moves, from_sq, to_sq,
-                move_idx, legal_indices, fen, played_uci,
+def _save_chunk(output_dir, chunk_idx, boards, moves, move_idx,
+                legal_indices, fen, played_uci,
                 played_engine_best, cp_loss, sample_weight):
     path = os.path.join(output_dir, f"chunk_{chunk_idx:04d}.npz")
     legal_lengths = np.array([len(indices) for indices in legal_indices],
@@ -395,8 +394,6 @@ def _save_chunk(output_dir, chunk_idx, boards, moves, from_sq, to_sq,
         path,
         boards  = np.array(boards,  dtype=np.float32),
         moves   = np.array(moves,   dtype=np.float32),
-        from_sq = np.array(from_sq, dtype=np.int32),
-        to_sq   = np.array(to_sq,   dtype=np.int32),
         move_idx = np.array(move_idx, dtype=np.int32),
         fen = np.array(fen, dtype=np.str_),
         played_uci = np.array(played_uci, dtype=np.str_),

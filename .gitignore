@@ -1,6 +1,7 @@
 *.exe
 !stockfish.js
 data/
+extractions/
 __pycache__/
 *.py[cod]
 *.pyo
