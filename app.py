@@ -12,6 +12,8 @@ CORS(app)
 _magnus_model = None
 _predict_fn   = None
 DEFAULT_MAGNUS_TEMPERATURE = float(os.environ.get('MAGNUS_TEMPERATURE', '1.2'))
+DEFAULT_MAGNUS_VALUE_WEIGHT = float(os.environ.get('MAGNUS_VALUE_WEIGHT', '2.0'))
+DEFAULT_MAGNUS_VALUE_CANDIDATES = int(os.environ.get('MAGNUS_VALUE_CANDIDATES', '0'))
 
 try:
     from load_model import load_trained_model, predict_next_move
@@ -70,11 +72,34 @@ def get_move():
         except (TypeError, ValueError):
             return jsonify({'error': "'temperature' must be a number"}), 400
         temperature = max(0.0, min(temperature, 3.0))
+        try:
+            value_weight = float(data.get('value_weight', DEFAULT_MAGNUS_VALUE_WEIGHT))
+            value_candidates = int(data.get(
+                'value_candidates', DEFAULT_MAGNUS_VALUE_CANDIDATES
+            ))
+        except (TypeError, ValueError):
+            return jsonify({
+                'error': "'value_weight' must be a number and "
+                         "'value_candidates' must be an integer"
+            }), 400
+        value_candidates = max(0, value_candidates)
 
-        uci = _predict_fn(_magnus_model, board, temperature=temperature)
+        uci = _predict_fn(
+            _magnus_model,
+            board,
+            temperature=temperature,
+            value_weight=value_weight,
+            value_candidate_limit=value_candidates,
+        )
         if uci is None:
             return jsonify({'error': 'Magnus model returned no move'}), 500
-        return jsonify({'move': uci, 'player': 'magnus', 'temperature': temperature})
+        return jsonify({
+            'move': uci,
+            'player': 'magnus',
+            'temperature': temperature,
+            'value_weight': value_weight,
+            'value_candidates': value_candidates,
+        })
 
     return jsonify({'error': f"Unknown player: '{player}'"}), 400
 

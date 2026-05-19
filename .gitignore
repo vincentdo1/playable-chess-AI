@@ -2,6 +2,8 @@
 !stockfish.js
 data/
 extractions/
+model/
+analysis_games/
 __pycache__/
 *.py[cod]
 *.pyo

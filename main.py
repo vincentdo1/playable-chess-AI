@@ -7,7 +7,8 @@ import chess_player
 # Vincent Do, April 2026
 class ChessGame:
     def __init__(self, white_player="you", black_player="random",
-                 magnus_temperature=1.2):
+                 magnus_temperature=1.2, magnus_value_weight=2.0,
+                 magnus_value_candidates=0):
         pygame.init()
         self.WINDOW_SIZE = 600
         self.screen = pygame.display.set_mode((self.WINDOW_SIZE, self.WINDOW_SIZE))
@@ -29,6 +30,8 @@ class ChessGame:
         self.white_player = white_player
         self.black_player = black_player
         self.magnus_temperature = magnus_temperature
+        self.magnus_value_weight = magnus_value_weight
+        self.magnus_value_candidates = magnus_value_candidates
 
         # Load Magnus model lazily — only when actually needed.
         self._magnus_model = None
@@ -114,6 +117,8 @@ class ChessGame:
                     self._magnus_model,
                     self.board,
                     temperature=self.magnus_temperature,
+                    value_weight=self.magnus_value_weight,
+                    value_candidate_limit=self.magnus_value_candidates,
                 )
                 ai_move = chess.Move.from_uci(uci) if uci else chess_player.random_move_player(self.board)
             else:
@@ -145,10 +150,17 @@ def main():
                         choices=('random', 'you', 'engine', 'alphabeta', 'magnus_carlsen'))
     parser.add_argument('--magnus_temperature', type=float, default=1.2,
                         help='Sampling temperature for the Magnus NN. 0 is deterministic.')
+    parser.add_argument('--magnus_value_weight', type=float, default=2.0,
+                        help='How strongly the value head reranks Magnus NN moves.')
+    parser.add_argument('--magnus_value_candidates', type=int, default=0,
+                        help='Top policy candidates to value-check. 0 checks every legal move.')
     args = parser.parse_args()
     magnus_temperature = max(0.0, min(args.magnus_temperature, 3.0))
+    magnus_value_candidates = max(0, args.magnus_value_candidates)
     application = ChessGame(args.white_player, args.black_player,
-                            magnus_temperature)
+                            magnus_temperature,
+                            args.magnus_value_weight,
+                            magnus_value_candidates)
     application.run()
 
 

@@ -11,7 +11,7 @@ This project combines several approaches to chess AI:
 - **Random** — picks a legal move at random
 - **Alphabeta** — minimax search with alpha-beta pruning, endgame-aware heuristics, and move ordering
 - **Stockfish** — UCI engine integration (desktop only)
-- **Magnus Carlsen NN** - a CNN + LSTM neural network trained on played human moves from GM/Magnus PGNs, with optional Stockfish annotations used for analysis and temperature sampling for move variety
+- **Magnus Carlsen NN** - a CNN + LSTM neural network trained on played human moves from GM/Magnus PGNs, with a legal move-policy head, a position value head, optional Stockfish annotations for quality metadata, and temperature sampling for move variety
 
 ---
 
@@ -66,9 +66,9 @@ set STOCKFISH_PATH=C:\path\to\stockfish.exe
 
 **Step 5 — Add the trained model**
 
-Place `grandmaster_model_policy_v1.pt` in the `model/` folder:
+Place `grandmaster_model_policy_value_v1.pt` in the `model/` folder:
 ```
-model/grandmaster_model_policy_v1.pt
+model/grandmaster_model_policy_value_v1.pt
 ```
 
 The model is not included in the repository due to its size. Contact the project owner or retrain using the instructions below.
@@ -92,6 +92,15 @@ python main.py --black_player alphabeta
 python main.py --black_player engine
 python main.py --black_player magnus_carlsen
 ```
+
+The Magnus neural network uses policy+value move selection by default. Tune it
+with:
+```
+python main.py --black_player magnus_carlsen --magnus_temperature 0.8 --magnus_value_weight 2.0 --magnus_value_candidates 0
+```
+`--magnus_value_weight 0` disables value reranking. `--magnus_value_candidates 0`
+checks every legal move with the value head; a positive number checks only the
+top policy candidates.
 
 **Watch two AIs play each other:**
 ```
@@ -121,20 +130,60 @@ Parses PGN files and saves positions as binary chunks for fast training. The mod
 
 By default, preprocessing reads `extractions/GM_games_2600.zip` and `extractions/magnus.zip`. Set `GM_ZIP` or `MAGNUS_ZIP` only if you want to use files somewhere else.
 
-Preprocessing also stores `cp_loss` and `sample_weight` metadata for each position when Stockfish is available. Set `STOCKFISH_PATH` if `stockfish.exe` is not in the project root. You can tune analysis with `CP_LOSS_TIME_LIMIT` or `CP_LOSS_DEPTH`, or set `CALCULATE_CP_LOSS=0` to skip this metadata pass.
+Preprocessing also stores `cp_loss`, `sample_weight`, `is_bad_move`, `cp_loss_bucket`, and `value_target` metadata for each position. `value_target` is a bounded side-to-move score, using Stockfish/eval annotations when available and the final game result as a fallback. `is_bad_move` is set from `BAD_MOVE_CP_LOSS_THRESHOLD`, and `cp_loss_bucket` marks unknown/ok/inaccuracy/mistake/blunder/critical categories. Set `STOCKFISH_PATH` if `stockfish.exe` is not in the project root. You can tune analysis with `CP_LOSS_TIME_LIMIT` or `CP_LOSS_DEPTH`, or set `CALCULATE_CP_LOSS=0` to skip the Stockfish metadata pass.
 
 The board tensor has 17 channels: 12 piece planes, 4 castling-right planes, and 1 en-passant target plane. The model predicts one fixed move-policy class for each `(from, to, promotion)` combination, then masks illegal moves during training and inference. Re-run preprocessing after architecture changes so saved chunks match the current model input shape and policy metadata.
 
 Preprocessing writes separate train, validation, and test chunks. Defaults are `TRAIN_SPLIT=0.80`, `VAL_SPLIT=0.10`, and `TEST_SPLIT=0.10`. Use fresh output directories for each preprocessing run, for example:
 ```
-$env:TRAIN_DIR = "data/train_chunks_policy_v1"
-$env:VAL_DIR = "data/val_chunks_policy_v1"
-$env:TEST_DIR = "data/test_chunks_policy_v1"
-$env:MODEL_PATH = "model/grandmaster_model_policy_v1.pt"
+$env:TRAIN_DIR = "data/train_chunks_policy_value_v1"
+$env:VAL_DIR = "data/val_chunks_policy_value_v1"
+$env:TEST_DIR = "data/test_chunks_policy_value_v1"
 python preprocess.py
 ```
 
 The split is by game, not by individual position. When both the GM archive and Magnus archive are used, preprocessing skips Magnus games whose headers already appear in the GM archive so duplicate games do not leak across train/validation/test.
+
+To add Lichess strong-player-vs-lower-rated games, first extract a smaller tagged PGN:
+```
+python extract_lichess_gm_vs_lower.py `
+  --input "C:\Users\Vincent\Downloads\lichess_db_standard_rated_2026-04.pgn.zst" `
+  --output "extractions\lichess_2500_vs_u2200_2026-04.pgn" `
+  --gm_min_elo 2500 `
+  --opponent_max_elo 2200 `
+  --max_games 100000
+```
+
+Then preprocess that tagged PGN. Positive targets come only from `TrainingPolicyColor` / `StrongSide`; lower-rated moves with high CP loss are saved as negative targets so training can learn to avoid them:
+```
+$env:CP_LOSS_DEPTH = "6"
+$env:BAD_MOVE_CP_LOSS_THRESHOLD = "150"
+$env:INACCURACY_CP_LOSS_THRESHOLD = "50"
+$env:MISTAKE_CP_LOSS_THRESHOLD = "150"
+$env:BLUNDER_CP_LOSS_THRESHOLD = "300"
+$env:CRITICAL_CP_LOSS_THRESHOLD = "900"
+python preprocess.py `
+  --single_pgn "extractions\lichess_2500_vs_u2200_2026-04.pgn" `
+  --output_dir "data\train_chunks_lichess_2500_vs_u2200_v1" `
+  --policy_color_mode tagged
+```
+
+To add shallow alpha-beta labels for bad candidate moves, enable
+search-assisted negatives during preprocessing. This keeps the played strong
+move as the positive label, then searches a few other legal moves and stores
+only the clearly worse alternatives as negative targets:
+```
+python preprocess.py `
+  --single_pgn "extractions\lichess_2500_vs_u2200_2026-04.pgn" `
+  --output_dir "data\train_chunks_lichess_search_negatives_v1" `
+  --policy_color_mode tagged `
+  --search_negative_candidates 8 `
+  --search_negative_max_per_position 2 `
+  --search_negative_depth 2 `
+  --search_negative_threshold 250 `
+  --search_negative_only `
+  --no_cp_loss
+```
 
 Update the paths in `preprocess.py` to match your machine, then run:
 ```
@@ -146,13 +195,23 @@ This takes 20–30 minutes and saves chunks to `data/train_chunks/`, `data/val_c
 ### Step 2 — Train the model
 
 ```
-$env:TRAIN_DIR = "data/train_chunks_policy_v1"
-$env:VAL_DIR = "data/val_chunks_policy_v1"
-$env:MODEL_PATH = "model/grandmaster_model_policy_v1.pt"
+$env:TRAIN_DIR = "data/train_chunks_policy_value_v1"
+$env:VAL_DIR = "data/val_chunks_policy_value_v1"
+$env:MODEL_PATH = "model/grandmaster_model_policy_value_v1.pt"
+$env:INIT_MODEL_PATH = "model/grandmaster_model_policy_v1.pt"
 python neural_network.py
 ```
 
-Training runs for up to 50 epochs with early stopping. On an RTX 3070, each epoch takes approximately 15–25 minutes. The best model is saved automatically to `model/grandmaster_model_policy_v1.pt` unless `MODEL_PATH` is set.
+Training runs for up to 50 epochs with early stopping. On an RTX 3070, each epoch takes approximately 15–25 minutes. The best model is saved automatically to `model/grandmaster_model_policy_value_v1.pt` unless `MODEL_PATH` is set. `INIT_MODEL_PATH` is optional; it warm-starts from the previous policy-only model while initializing the new value head.
+
+To train on the original GM/Magnus chunks plus the Lichess negative-example chunks, use `TRAIN_DIRS` separated by semicolons on Windows:
+```
+$env:TRAIN_DIRS = "data/train_chunks_policy_value_v1;data/train_chunks_lichess_2500_vs_u2200_v1"
+$env:VAL_DIR = "data/val_chunks_policy_value_v1"
+$env:MODEL_PATH = "model/grandmaster_model_policy_value_negatives_v1.pt"
+$env:INIT_MODEL_PATH = "model/grandmaster_model_policy_value_v1.pt"
+python neural_network.py
+```
 
 ### Step 3 — Test the model
 
@@ -164,8 +223,8 @@ Loads the trained model and predicts the first move from the starting position.
 
 For held-out test-set metrics and example predictions:
 ```
-$env:TEST_DIR = "data/test_chunks_policy_v1"
-$env:MODEL_PATH = "model/grandmaster_model_policy_v1.pt"
+$env:TEST_DIR = "data/test_chunks_policy_value_v1"
+$env:MODEL_PATH = "model/grandmaster_model_policy_value_v1.pt"
 python evaluate_model.py --model $env:MODEL_PATH --examples 10
 ```
 
@@ -190,7 +249,7 @@ The server starts at `http://localhost:5000`. The web interface automatically co
 `POST /api/move` — get the next move
 ```json
 { "fen": "<FEN string>", "player": "alphabeta", "depth": 3 }
-{ "fen": "<FEN string>", "player": "magnus", "temperature": 1.2 }
+{ "fen": "<FEN string>", "player": "magnus", "temperature": 1.2, "value_weight": 2.0, "value_candidates": 0 }
 ```
 
 ---
