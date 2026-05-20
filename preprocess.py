@@ -18,8 +18,8 @@ import chess.pgn
 
 import chess_player
 from neural_network import (
-    fen_to_tensor, legal_policy_indices, move_sequence_to_vector,
-    move_to_policy_index
+    BOARD_ENCODING_VERSION, fen_to_tensor, legal_policy_indices,
+    move_sequence_to_vector, move_to_policy_index
 )
 
 # Config. Environment variables can override these defaults.
@@ -783,6 +783,7 @@ def _save_chunk(output_dir, chunk_idx, boards, moves, move_idx,
     np.savez_compressed(
         path,
         boards  = np.array(boards,  dtype=np.float32),
+        board_encoding = np.array(BOARD_ENCODING_VERSION, dtype=np.str_),
         moves   = np.array(moves,   dtype=np.float32),
         move_idx = np.array(move_idx, dtype=np.int32),
         policy_target_type = np.array(policy_target_type, dtype=np.int8),

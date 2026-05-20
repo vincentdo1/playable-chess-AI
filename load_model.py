@@ -6,28 +6,42 @@ import numpy as np
 import torch
 import chess
 
-from neural_network import (ChessModel, fen_to_tensor, move_sequence_to_vector,
-                             move_to_policy_index, MODEL_PATH, DEVICE)
+from neural_network import (
+    BOARD_ENCODING_VERSION, ChessModel, fen_to_tensor,
+    move_sequence_to_vector, move_to_policy_index, MODEL_PATH, DEVICE
+)
 
-LEGACY_MODEL_PATH = 'model/grandmaster_model_policy_v1.pt'
 DEFAULT_VALUE_WEIGHT = float(os.environ.get('MAGNUS_VALUE_WEIGHT', '2.0'))
 DEFAULT_VALUE_CANDIDATES = int(os.environ.get('MAGNUS_VALUE_CANDIDATES', '0'))
 
 def load_trained_model(path: str = MODEL_PATH) -> ChessModel:
     """Load a saved ChessModel from a .pt checkpoint file."""
-    if (
-        path == MODEL_PATH and
-        not os.path.exists(path) and
-        os.path.exists(LEGACY_MODEL_PATH)
-    ):
-        print(f"Model {path} not found; falling back to {LEGACY_MODEL_PATH}")
-        path = LEGACY_MODEL_PATH
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Model checkpoint {path!r} was not found. Train the current "
+            "perspective/residual model or set MODEL_PATH to a matching "
+            "checkpoint."
+        )
 
     checkpoint = torch.load(path, map_location=DEVICE)
+    checkpoint_encoding = checkpoint.get('board_encoding')
+    if checkpoint_encoding is not None and checkpoint_encoding != BOARD_ENCODING_VERSION:
+        raise ValueError(
+            f"Checkpoint uses board encoding {checkpoint_encoding!r}, but this "
+            f"code expects {BOARD_ENCODING_VERSION!r}. Re-train or load a "
+            "matching model architecture."
+        )
     model = ChessModel().to(DEVICE)
-    load_result = model.load_state_dict(
-        checkpoint['model_state_dict'], strict=False
-    )
+    try:
+        load_result = model.load_state_dict(
+            checkpoint['model_state_dict'], strict=False
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Could not load {path!r} into the current model architecture. "
+            "This usually means the checkpoint was trained before the "
+            "perspective/residual architecture change."
+        ) from exc
     model.eval()
     print(f"Model loaded from {path}")
     epoch = checkpoint.get('epoch', '?')

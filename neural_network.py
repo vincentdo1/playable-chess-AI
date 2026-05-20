@@ -13,12 +13,16 @@ from torch.utils.data import DataLoader
 # Config
 TRAIN_DIR  = os.environ.get('TRAIN_DIRS', os.environ.get('TRAIN_DIR', 'data/train_chunks'))
 VAL_DIR    = os.environ.get('VAL_DIRS', os.environ.get('VAL_DIR', 'data/val_chunks'))
-MODEL_PATH = os.environ.get('MODEL_PATH', 'model/grandmaster_model_policy_value_v1.pt')
+MODEL_PATH = os.environ.get(
+    'MODEL_PATH', 'model/grandmaster_model_perspective_resnet_v2.pt'
+)
 INIT_MODEL_PATH = os.environ.get('INIT_MODEL_PATH')
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', '512'))
 EPOCHS     = int(os.environ.get('EPOCHS', '50'))
 SEQ_LEN    = 10
 LR         = float(os.environ.get('LR', '1e-3'))
+RESIDUAL_FILTERS = int(os.environ.get('RESIDUAL_FILTERS', '128'))
+RESIDUAL_BLOCKS = int(os.environ.get('RESIDUAL_BLOCKS', '8'))
 VALUE_LOSS_WEIGHT = float(os.environ.get('VALUE_LOSS_WEIGHT', '0.25'))
 NEGATIVE_POLICY_LOSS_WEIGHT = float(os.environ.get(
     'NEGATIVE_POLICY_LOSS_WEIGHT', '1.0'
@@ -42,13 +46,27 @@ if __name__ == '__main__':
     if DEVICE.type == 'cuda':
         print(f"  GPU: {torch.cuda.get_device_name(0)}")
 
+BOARD_ENCODING_VERSION = 'perspective_v2'
+
 piece_to_index = {
-    'p': 0, 'n': 1, 'b': 2, 'r': 3, 'q': 4, 'k': 5,
-    'P': 6, 'N': 7, 'B': 8, 'R': 9, 'Q': 10, 'K': 11,
-    'ck': 12, 'cq': 13, 'CK': 14, 'CQ': 15,
+    'own_pawn': 0, 'own_knight': 1, 'own_bishop': 2,
+    'own_rook': 3, 'own_queen': 4, 'own_king': 5,
+    'opp_pawn': 6, 'opp_knight': 7, 'opp_bishop': 8,
+    'opp_rook': 9, 'opp_queen': 10, 'opp_king': 11,
+    'own_kingside_castle': 12, 'own_queenside_castle': 13,
+    'opp_kingside_castle': 14, 'opp_queenside_castle': 15,
     'ep': 16,
 }
 BOARD_CHANNELS = len(piece_to_index)
+
+_PIECE_TYPE_TO_NAME = {
+    chess.PAWN: 'pawn',
+    chess.KNIGHT: 'knight',
+    chess.BISHOP: 'bishop',
+    chess.ROOK: 'rook',
+    chess.QUEEN: 'queen',
+    chess.KING: 'king',
+}
 
 PROMOTION_OPTIONS = (None, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN)
 PROMOTION_TO_INDEX = {promotion: i for i, promotion in enumerate(PROMOTION_OPTIONS)}
@@ -59,36 +77,51 @@ POLICY_TARGET_NEGATIVE = -1
 
 # Data helpers
 
-def fen_to_tensor(fen, flip: bool = False):
-    """FEN -> 8x8x17 tensor. flip=True rotates for Black so the model always sees its own pieces at the bottom."""
+def fen_to_tensor(fen, flip: bool | None = None):
+    """FEN -> 8x8x17 perspective tensor.
+
+    By default, the tensor uses the FEN side-to-move perspective. Passing
+    flip=True forces Black's perspective; passing flip=False forces White's.
+    Black perspective rotates the board 180 degrees and maps Black pieces to
+    the "own_*" channels. That keeps policy coordinates and board channels in
+    the same side-to-move frame instead of mixing perspective moves with
+    absolute white/black piece planes.
+    """
     tensor = np.zeros((8, 8, BOARD_CHANNELS), dtype=np.float32)
-    parts = fen.split(' ')
-    rows = parts[0].split('/')
-    for i, row in enumerate(rows):
-        tensor_row = 7 - i
-        j = 0
-        for char in row:
-            if char.isdigit():
-                j += int(char)
-            else:
-                tensor[tensor_row, j, piece_to_index[char]] = 1
-                j += 1
-    castling = parts[2]
-    if 'K' in castling: tensor[:, :, piece_to_index['CK']] = 1
-    if 'Q' in castling: tensor[:, :, piece_to_index['CQ']] = 1
-    if 'k' in castling: tensor[:, :, piece_to_index['ck']] = 1
-    if 'q' in castling: tensor[:, :, piece_to_index['cq']] = 1
+    board = chess.Board(fen)
+    if flip is None:
+        flip = board.turn == chess.BLACK
+    own_color = chess.BLACK if flip else chess.WHITE
 
-    en_passant = parts[3] if len(parts) > 3 else '-'
-    if en_passant != '-':
-        ep_square = chess.parse_square(en_passant)
-        ep_rank = chess.square_rank(ep_square)
-        ep_file = chess.square_file(ep_square)
-        tensor[ep_rank, ep_file, piece_to_index['ep']] = 1
+    for square, piece in board.piece_map().items():
+        rank = chess.square_rank(square)
+        file = chess.square_file(square)
+        row = 7 - rank if flip else rank
+        col = 7 - file if flip else file
+        side = 'own' if piece.color == own_color else 'opp'
+        piece_name = _PIECE_TYPE_TO_NAME[piece.piece_type]
+        tensor[row, col, piece_to_index[f'{side}_{piece_name}']] = 1.0
 
-    if flip:
-        # Rotate board 180 degrees: reverse both rows and columns
-        tensor = tensor[::-1, ::-1, :].copy()
+    castling = board.castling_xfen()
+    own_k = 'k' if own_color == chess.BLACK else 'K'
+    own_q = 'q' if own_color == chess.BLACK else 'Q'
+    opp_k = 'K' if own_color == chess.BLACK else 'k'
+    opp_q = 'Q' if own_color == chess.BLACK else 'q'
+    if own_k in castling:
+        tensor[:, :, piece_to_index['own_kingside_castle']] = 1.0
+    if own_q in castling:
+        tensor[:, :, piece_to_index['own_queenside_castle']] = 1.0
+    if opp_k in castling:
+        tensor[:, :, piece_to_index['opp_kingside_castle']] = 1.0
+    if opp_q in castling:
+        tensor[:, :, piece_to_index['opp_queenside_castle']] = 1.0
+
+    if board.ep_square is not None:
+        ep_rank = chess.square_rank(board.ep_square)
+        ep_file = chess.square_file(board.ep_square)
+        row = 7 - ep_rank if flip else ep_rank
+        col = 7 - ep_file if flip else ep_file
+        tensor[row, col, piece_to_index['ep']] = 1.0
 
     return tensor
 
@@ -180,6 +213,16 @@ class ChunkDataset(torch.utils.data.IterableDataset):
 
         for path in paths:
             with np.load(path) as data:
+                board_encoding = (
+                    str(data['board_encoding'].item())
+                    if 'board_encoding' in data else None
+                )
+                if board_encoding != BOARD_ENCODING_VERSION:
+                    raise ValueError(
+                        f"{path} uses board encoding {board_encoding!r}, but "
+                        f"this model expects {BOARD_ENCODING_VERSION!r}. "
+                        "Re-run preprocess.py with the current code."
+                    )
                 boards  = data['boards']
                 moves   = data['moves']
                 move_idx = data['move_idx'] if 'move_idx' in data else None
@@ -265,20 +308,43 @@ def policy_loss_for_targets(masked_logits, move_idx, target_type):
 
 # Model
 
+class ResidualBlock(nn.Module):
+    """Two padded 3x3 convolutions with a skip connection."""
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(
+            channels, channels, kernel_size=3, padding=1, bias=False
+        )
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(
+            channels, channels, kernel_size=3, padding=1, bias=False
+        )
+        self.bn2 = nn.BatchNorm2d(channels)
+
+    def forward(self, x):
+        residual = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return self.relu(out + residual)
+
 class ChessModel(nn.Module):
-    """CNN + LSTM trunk with separate legal policy and position value heads."""
+    """Perspective ResNet + LSTM with separate legal policy and value heads."""
     def __init__(self):
         super().__init__()
         self.cnn = nn.Sequential(
-            nn.Conv2d(BOARD_CHANNELS, 64, kernel_size=3),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3),
-            nn.ReLU(),
+            nn.Conv2d(
+                BOARD_CHANNELS, RESIDUAL_FILTERS, kernel_size=3,
+                padding=1, bias=False,
+            ),
+            nn.BatchNorm2d(RESIDUAL_FILTERS),
+            nn.ReLU(inplace=True),
+            *[ResidualBlock(RESIDUAL_FILTERS) for _ in range(RESIDUAL_BLOCKS)],
             nn.Flatten(),
         )
         self.lstm = nn.LSTM(input_size=132, hidden_size=64, batch_first=True)
         self.fc = nn.Sequential(
-            nn.Linear(1088, 256),
+            nn.Linear(RESIDUAL_FILTERS * 8 * 8 + 64, 256),
             nn.ReLU(),
             nn.Linear(256, 128),  # Dropout removed — hurts chess CNN performance
             nn.ReLU(),
@@ -424,6 +490,19 @@ def evaluate(model, loader, value_criterion, device, max_batches=None):
         'negative_samples': negative_total,
     }
 
+def load_compatible_state_dict(model, checkpoint):
+    """Load only checkpoint tensors whose names and shapes still match."""
+    current = model.state_dict()
+    compatible = {}
+    skipped = []
+    for name, tensor in checkpoint['model_state_dict'].items():
+        if name in current and current[name].shape == tensor.shape:
+            compatible[name] = tensor
+        else:
+            skipped.append(name)
+    result = model.load_state_dict(compatible, strict=False)
+    return result, skipped
+
 def main():
     model_dir = os.path.dirname(MODEL_PATH)
     if model_dir:
@@ -454,14 +533,16 @@ def main():
     model     = ChessModel().to(DEVICE)
     if INIT_MODEL_PATH:
         checkpoint = torch.load(INIT_MODEL_PATH, map_location=DEVICE)
-        load_result = model.load_state_dict(
-            checkpoint['model_state_dict'], strict=False
+        load_result, skipped_shape_keys = load_compatible_state_dict(
+            model, checkpoint
         )
         print(f"Initialized model from {INIT_MODEL_PATH}")
         if load_result.missing_keys:
             print(f"  Newly initialized layers: {load_result.missing_keys}")
         if load_result.unexpected_keys:
             print(f"  Ignored checkpoint layers: {load_result.unexpected_keys}")
+        if skipped_shape_keys:
+            print(f"  Skipped incompatible tensors: {skipped_shape_keys}")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     value_criterion = nn.MSELoss(reduction='none')
@@ -471,6 +552,8 @@ def main():
     scaler = torch.amp.GradScaler('cuda', enabled=DEVICE.type == 'cuda')
 
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"Board encoding: {BOARD_ENCODING_VERSION}")
+    print(f"Residual tower: {RESIDUAL_BLOCKS} blocks x {RESIDUAL_FILTERS} filters")
     print(f"Batch size : {BATCH_SIZE}  |  Max epochs : {EPOCHS}")
     print(f"Value loss weight: {VALUE_LOSS_WEIGHT}\n")
     print(f"Negative policy loss weight: {NEGATIVE_POLICY_LOSS_WEIGHT}\n")
@@ -521,6 +604,9 @@ def main():
                     'val_policy_loss':      val_metrics['policy_loss'],
                     'val_value_loss':       val_metrics['value_loss'],
                     'val_value_mae':        val_metrics['value_mae'],
+                    'board_encoding':        BOARD_ENCODING_VERSION,
+                    'residual_filters':      RESIDUAL_FILTERS,
+                    'residual_blocks':       RESIDUAL_BLOCKS,
                     'value_loss_weight':    VALUE_LOSS_WEIGHT,
                     'negative_policy_loss_weight': NEGATIVE_POLICY_LOSS_WEIGHT,
                 }, MODEL_PATH)
