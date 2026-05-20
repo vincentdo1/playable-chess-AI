@@ -1,4 +1,4 @@
-# Chess AI — Vincent Do
+# Chess AI - Vincent Do
 
 A playable chess application featuring multiple AI players including a neural network trained on Magnus Carlsen's games. Available as a desktop app and a web interface.
 
@@ -8,9 +8,9 @@ A playable chess application featuring multiple AI players including a neural ne
 
 This project combines several approaches to chess AI:
 
-- **Random** — picks a legal move at random
-- **Alphabeta** — minimax search with alpha-beta pruning, endgame-aware heuristics, and move ordering
-- **Stockfish** — UCI engine integration (desktop only)
+- **Random** - picks a legal move at random
+- **Alphabeta** - minimax search with alpha-beta pruning, endgame-aware heuristics, and move ordering
+- **Stockfish** - UCI engine integration (desktop only)
 - **Magnus Carlsen NN** - a perspective ResNet + LSTM neural network trained on played human moves from GM/Magnus PGNs, with a legal move-policy head, a position value head, optional Stockfish/search quality metadata, and temperature sampling for move variety
 
 ---
@@ -23,11 +23,27 @@ The easiest way to play. No setup required.
 
 Features available in the browser:
 - Human, Stockfish (WebAssembly), Random, Alphabeta AI, and Magnus Carlsen NN
-- Adjustable Stockfish skill level (0–20)
+- Adjustable Stockfish skill level (0-20)
 - Adjustable alphabeta search depth
 - Move history, status display, flip board, undo move
 
 The web interface calls a Flask backend hosted on Railway for the Alphabeta and Magnus Carlsen players. Stockfish and Random run entirely in the browser with no server needed.
+
+The frontend is split into a small HTML shell plus ES modules under `frontend/src/`:
+
+- `api/` handles Flask calls.
+- `components/` owns DOM-facing UI controllers.
+- `game/` owns chess game orchestration.
+- `services/` wraps browser engines such as Stockfish.
+- `styles/` contains app CSS.
+
+For local frontend development, serve the repo root instead of opening the file directly:
+
+```powershell
+python -m http.server 8000
+```
+
+Then open `http://localhost:8000`.
 
 ---
 
@@ -37,38 +53,38 @@ The web interface calls a Flask backend hosted on Railway for the Alphabeta and 
 
 - Python 3.12
 - An Nvidia GPU (recommended for Magnus Carlsen NN inference)
-- Stockfish 17 — download from `https://stockfishchess.org/download/`
+- Stockfish 17 - download from `https://stockfishchess.org/download/`
 
 ### Installation
 
-**Step 1 — Create a virtual environment with Python 3.12:**
+**Step 1 - Create a virtual environment with Python 3.12:**
 ```
 py -3.12 -m venv chess_env
 chess_env\Scripts\activate
 ```
 
-**Step 2 — Install PyTorch with CUDA support:**
+**Step 2 - Install PyTorch with CUDA support:**
 ```
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 
-**Step 3 — Install remaining dependencies:**
+**Step 3 - Install remaining dependencies:**
 ```
 pip install -r requirements-local.txt
 ```
 
-**Step 4 — Add Stockfish**
+**Step 4 - Add Stockfish**
 
 Place `stockfish.exe` in the project root, or set the environment variable to point to it anywhere on your machine:
 ```
 set STOCKFISH_PATH=C:\path\to\stockfish.exe
 ```
 
-**Step 5 — Add the trained model**
+**Step 5 - Add the trained model**
 
-Place `grandmaster_model_perspective_resnet_v2.pt` in the `model/` folder:
+Place `grandmaster_model_perspective_resnet_negatives_v2.pt` in the `model/` folder:
 ```
-model/grandmaster_model_perspective_resnet_v2.pt
+model/grandmaster_model_perspective_resnet_negatives_v2.pt
 ```
 
 The model is not included in the repository due to its size. Contact the project owner or retrain using the instructions below.
@@ -124,7 +140,7 @@ python main.py --white_player random --black_player magnus_carlsen
 
 ## Training the neural network
 
-### Step 1 — Preprocess PGN data (run once)
+### Step 1 - Preprocess PGN data (run once)
 
 Parses PGN files and saves positions as binary chunks for fast training. The model is trained on the move actually played in the PGN. If Stockfish annotations such as `[%best_move: ...]` are present, preprocessing reports how often the played move matched the engine top move and stores that as metadata, but it does not use Stockfish's move as the training label.
 
@@ -190,9 +206,9 @@ Update the paths in `preprocess.py` to match your machine, then run:
 python preprocess.py
 ```
 
-This takes 20–30 minutes and saves chunks to `data/train_chunks/`, `data/val_chunks/`, and `data/test_chunks/` by default.
+This takes 20-30 minutes and saves chunks to `data/train_chunks/`, `data/val_chunks/`, and `data/test_chunks/` by default.
 
-### Step 2 — Train the model
+### Step 2 - Train the model
 
 ```
 $env:TRAIN_DIR = "data/train_chunks_perspective_v2"
@@ -201,7 +217,7 @@ $env:MODEL_PATH = "model/grandmaster_model_perspective_resnet_v2.pt"
 python neural_network.py
 ```
 
-Training runs for up to 50 epochs with early stopping. On an RTX 3070, each epoch takes longer than the old two-layer CNN because the model now uses a padded residual tower. The best model is saved automatically to `model/grandmaster_model_perspective_resnet_v2.pt` unless `MODEL_PATH` is set. Avoid warm-starting from old absolute-channel checkpoints unless you are only doing a quick experiment; the board encoding and trunk architecture changed.
+Training runs for up to 50 epochs with early stopping. On an RTX 3070, each epoch takes longer than the old two-layer CNN because the model now uses a padded residual tower. Set `MODEL_PATH` to the checkpoint name you want; without it, training defaults to `model/grandmaster_model_perspective_resnet_negatives_v2.pt`. Avoid warm-starting from old absolute-channel checkpoints unless you are only doing a quick experiment; the board encoding and trunk architecture changed.
 
 To train on the original GM/Magnus chunks plus the Lichess negative-example chunks, use `TRAIN_DIRS` separated by semicolons on Windows:
 ```
@@ -211,7 +227,7 @@ $env:MODEL_PATH = "model/grandmaster_model_perspective_resnet_negatives_v2.pt"
 python neural_network.py
 ```
 
-### Step 3 — Test the model
+### Step 3 - Test the model
 
 ```
 python load_model.py
@@ -222,19 +238,23 @@ Loads the trained model and predicts the first move from the starting position.
 For held-out test-set metrics and example predictions:
 ```
 $env:TEST_DIR = "data/test_chunks_perspective_v2"
-$env:MODEL_PATH = "model/grandmaster_model_perspective_resnet_v2.pt"
+$env:MODEL_PATH = "model/grandmaster_model_perspective_resnet_negatives_v2.pt"
 python evaluate_model.py --model $env:MODEL_PATH --examples 10
 ```
 
 ---
 
-## Flask backend (for web interface)
+## Backend API
 
-The web interface uses a Flask backend to run Alphabeta and Magnus Carlsen moves server-side.
+The web interface uses a Flask backend to run Alphabeta and Magnus Carlsen moves server-side. The implementation lives in `backend/app.py`; root `app.py` is a compatibility wrapper.
 
 **Run locally:**
 ```
 pip install flask flask-cors
+$env:MODEL_PATH = "model/grandmaster_model_perspective_resnet_negatives_v2.pt"
+$env:MAGNUS_TEMPERATURE = "0"
+$env:MAGNUS_VALUE_WEIGHT = "2.0"
+$env:MAGNUS_VALUE_CANDIDATES = "0"
 python app.py
 ```
 
@@ -242,12 +262,12 @@ The server starts at `http://localhost:5000`. The web interface automatically co
 
 **API endpoints:**
 
-`GET /` — health check, returns available players
+`GET /` - health check, returns available players and the loaded Magnus model
 
-`POST /api/move` — get the next move
+`POST /api/move` - get the next move
 ```json
 { "fen": "<FEN string>", "player": "alphabeta", "depth": 3 }
-{ "fen": "<FEN string>", "player": "magnus", "temperature": 1.2, "value_weight": 2.0, "value_candidates": 0 }
+{ "fen": "<FEN string>", "player": "magnus", "temperature": 0.0, "value_weight": 2.0, "value_candidates": 0 }
 ```
 
 ---
@@ -256,18 +276,24 @@ The server starts at `http://localhost:5000`. The web interface automatically co
 
 ```
 playable-chess-AI/
-├── main.py              — desktop chess GUI (Pygame)
-├── chess_player.py      — player implementations (random, alphabeta, stockfish)
-├── neural_network.py    — model architecture and training pipeline
-├── load_model.py        — model loading and move prediction
-├── preprocess.py        — PGN → .npz chunk conversion
-├── heuristics.py        — piece-square tables and endgame evaluation
-├── app.py               — Flask backend for web interface
-├── index.html           — web interface (GitHub Pages)
-├── stockfish.js         — Stockfish WebAssembly (for browser play)
-├── pieces/              — chess piece PNG images
-├── model/               — saved PyTorch checkpoints
-└── data/                — generated training chunks (not in Git)
+backend/                 Flask API package
+frontend/src/api/        Browser API client
+frontend/src/components/ DOM-facing UI controllers
+frontend/src/game/       Chess game orchestration
+frontend/src/services/   Browser engine wrappers
+frontend/src/styles/     CSS
+index.html               Frontend app shell for GitHub Pages
+app.py                   Compatibility wrapper for backend.app
+main.py                  Desktop chess GUI (Pygame)
+chess_player.py          Player implementations
+neural_network.py        Model architecture and training pipeline
+load_model.py            Model loading and move prediction
+preprocess.py            PGN -> .npz chunk conversion
+heuristics.py            Piece-square tables and endgame evaluation
+stockfish.js             Stockfish WebAssembly for browser play
+pieces/                  Chess piece PNG images
+model/                   Saved PyTorch checkpoints, ignored by Git
+data/                    Generated training chunks, ignored by Git
 ```
 
 ---
@@ -276,10 +302,10 @@ playable-chess-AI/
 
 The web backend is deployed to Railway. Pushing to the `main` branch triggers an automatic redeploy.
 
-To deploy your own instance, connect your GitHub repo to Railway and set the start command to `python app.py`. The backend URL must be updated in `index.html`:
+To deploy your own instance, connect your GitHub repo to Railway and set the start command to `python -m backend.app`. The backend URL lives in `frontend/src/config.js`:
 
 ```javascript
-var API_URL = window.location.hostname === 'localhost'
+apiUrl: isFile || isLocalHost
   ? 'http://localhost:5000'
-  : 'https://your-railway-url.up.railway.app';
+  : 'https://your-railway-url.up.railway.app',
 ```

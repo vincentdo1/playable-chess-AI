@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 TRAIN_DIR  = os.environ.get('TRAIN_DIRS', os.environ.get('TRAIN_DIR', 'data/train_chunks'))
 VAL_DIR    = os.environ.get('VAL_DIRS', os.environ.get('VAL_DIR', 'data/val_chunks'))
 MODEL_PATH = os.environ.get(
-    'MODEL_PATH', 'model/grandmaster_model_perspective_resnet_v2.pt'
+    'MODEL_PATH', 'model/grandmaster_model_perspective_resnet_negatives_v2.pt'
 )
 INIT_MODEL_PATH = os.environ.get('INIT_MODEL_PATH')
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', '512'))
