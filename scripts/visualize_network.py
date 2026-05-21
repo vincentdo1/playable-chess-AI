@@ -12,6 +12,7 @@ so changing RESIDUAL_FILTERS or RESIDUAL_BLOCKS auto-rescales the output.
 Usage:
     python scripts/visualize_network.py
     python scripts/visualize_network.py --fen <FEN> --frames 180
+    python scripts/visualize_network.py --layout portfolio --output-name chess-network
     python scripts/visualize_network.py --no-mp4 --no-webm --frames 60
 """
 
@@ -195,6 +196,53 @@ class LayerSpec:
     y_positions: np.ndarray = field(default_factory=lambda: np.array([]))
     node_sizes: np.ndarray = field(default_factory=lambda: np.array([]))
     color: str = '#7aa7ff'             # used for short_label text
+
+
+@dataclass(frozen=True)
+class LayoutConfig:
+    """Composition presets for different embed targets."""
+    name: str
+    show_title: bool = True
+    show_board: bool = True
+    show_readout: bool = True
+    layer_x_left: float = 0.23
+    layer_x_right: float = 0.94
+    layer_y_low: float = 0.24
+    layer_y_high: float = 0.82
+    board_x0: float = 0.035
+    board_x1: float = 0.175
+    board_y_top: float = 0.84
+
+
+LAYOUTS: dict[str, LayoutConfig] = {
+    'full': LayoutConfig(name='full'),
+    # Portfolio cards add their own title, badges, and gradient treatment.
+    # Keep this export focused on the moving network so it does not fight
+    # the card chrome or make the chess board look cramped.
+    'card': LayoutConfig(
+        name='card',
+        show_title=False,
+        show_board=False,
+        show_readout=False,
+        layer_x_left=0.055,
+        layer_x_right=0.965,
+        layer_y_low=0.18,
+        layer_y_high=0.82,
+    ),
+    # Tailored for vincent-portfolio's featured project card:
+    # top corners have metadata labels and the bottom band carries the
+    # large project title, so keep the network in the card's open field.
+    'portfolio': LayoutConfig(
+        name='portfolio',
+        show_title=False,
+        show_board=False,
+        show_readout=False,
+        layer_x_left=0.24,
+        layer_x_right=0.965,
+        layer_y_low=0.31,
+        layer_y_high=0.82,
+    ),
+}
 
 
 # ---------- Model loading ----------
@@ -494,31 +542,33 @@ def _gaussian(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
 
 
 def draw_static_chrome(ax, layers: list[LayerSpec], board: chess.Board,
-                       used_random_init: bool):
+                       used_random_init: bool, layout: LayoutConfig,
+                       width: int, height: int):
     # Title typography reflects the active palette so the chrome matches
     # whichever brand frame the viz will live inside.
-    title_text = 'Chess  CNN  +  LSTM'
-    subtitle_text = (
-        f'{RESIDUAL_BLOCKS} residual blocks   /   '
-        'LSTM 132 -> 64   /   policy + value'
-    )
-    if TITLE_CAPS:
-        title_text = title_text.upper()
-        subtitle_text = subtitle_text.upper()
-    ax.text(
-        0.5, 0.945, title_text,
-        ha='center', va='center', color=TITLE_COLOR,
-        fontsize=22, fontweight=TITLE_WEIGHT, family=TITLE_FAMILY,
-        fontstyle=TITLE_STYLE,
-    )
-    ax.text(
-        0.5, 0.895, subtitle_text,
-        ha='center', va='center', color=SUBTLE_COLOR,
-        fontsize=8,
-        family='monospace' if TITLE_FAMILY == 'monospace' else 'sans-serif',
-    )
+    if layout.show_title:
+        title_text = 'Chess  CNN  +  LSTM'
+        subtitle_text = (
+            f'{RESIDUAL_BLOCKS} residual blocks   /   '
+            'LSTM 132 -> 64   /   policy + value'
+        )
+        if TITLE_CAPS:
+            title_text = title_text.upper()
+            subtitle_text = subtitle_text.upper()
+        ax.text(
+            0.5, 0.945, title_text,
+            ha='center', va='center', color=TITLE_COLOR,
+            fontsize=22, fontweight=TITLE_WEIGHT, family=TITLE_FAMILY,
+            fontstyle=TITLE_STYLE,
+        )
+        ax.text(
+            0.5, 0.895, subtitle_text,
+            ha='center', va='center', color=SUBTLE_COLOR,
+            fontsize=8,
+            family='monospace' if TITLE_FAMILY == 'monospace' else 'sans-serif',
+        )
 
-    if used_random_init:
+    if used_random_init and layout.show_title:
         ax.text(
             0.5, 0.005,
             'demo render — checkpoint architecture mismatch',
@@ -526,22 +576,22 @@ def draw_static_chrome(ax, layers: list[LayerSpec], board: chess.Board,
             fontsize=7, family='sans-serif', alpha=0.85,
         )
 
-    # Board inset on the left, kept square for a 16:9 canvas
-    # (axis aspect = 960/540 = 1.778, so y_span = x_span * 1.778).
-    board_img = render_board_image(board, size_px=256)
-    x0_b, x1_b = 0.035, 0.175
-    y_height = (x1_b - x0_b) * (960 / 540)
-    y_top    = 0.84
-    ax.imshow(
-        board_img, extent=(x0_b, x1_b, y_top - y_height, y_top),
-        zorder=5, interpolation='lanczos',
-    )
-    # Thin accent-color border matching the active palette
-    ax.add_patch(mpatches.Rectangle(
-        (x0_b, y_top - y_height), x1_b - x0_b, y_height,
-        linewidth=0.6, edgecolor=BOARD_BORDER, facecolor='none',
-        alpha=0.45, zorder=6,
-    ))
+    if layout.show_board:
+        # Board inset on the left, kept square in rendered pixels.
+        board_img = render_board_image(board, size_px=256)
+        x0_b, x1_b = layout.board_x0, layout.board_x1
+        y_height = (x1_b - x0_b) * (width / height)
+        y_top = layout.board_y_top
+        ax.imshow(
+            board_img, extent=(x0_b, x1_b, y_top - y_height, y_top),
+            zorder=5, interpolation='lanczos',
+        )
+        # Thin accent-color border matching the active palette
+        ax.add_patch(mpatches.Rectangle(
+            (x0_b, y_top - y_height), x1_b - x0_b, y_height,
+            linewidth=0.6, edgecolor=BOARD_BORDER, facecolor='none',
+            alpha=0.45, zorder=6,
+        ))
 
 
 def draw_readout(ax, policy_spec: LayerSpec, value_scalar: float,
@@ -709,17 +759,20 @@ def update_frame(frame: int, total_frames: int, layers, node_artists,
         art.set_offsets(np.column_stack([xs, ys]))
         art.set_alpha(float(0.95 * env))
 
-    # Readout: top move + value fade in as the pulse reaches the heads.
-    move_reveal = max(0.0, min(1.0, (p - policy_x + 0.04) / 0.10))
-    value_reveal = max(0.0, min(1.0, (p - value_x + 0.04) / 0.10))
-    readout['move_label'].set_text(readout['best_move_text'] if move_reveal > 0 else '')
-    readout['move_label'].set_alpha(float(move_reveal))
-    readout['move_caption'].set_alpha(float(move_reveal * 0.85))
-    scalar = readout['value_scalar']
-    settled = scalar * value_reveal
-    readout['value_label'].set_text(f'{settled:+.2f}')
-    readout['value_label'].set_alpha(float(value_reveal))
-    readout['value_caption'].set_alpha(float(value_reveal * 0.85))
+    if readout is not None:
+        # Readout: top move + value fade in as the pulse reaches the heads.
+        move_reveal = max(0.0, min(1.0, (p - policy_x + 0.04) / 0.10))
+        value_reveal = max(0.0, min(1.0, (p - value_x + 0.04) / 0.10))
+        readout['move_label'].set_text(
+            readout['best_move_text'] if move_reveal > 0 else ''
+        )
+        readout['move_label'].set_alpha(float(move_reveal))
+        readout['move_caption'].set_alpha(float(move_reveal * 0.85))
+        scalar = readout['value_scalar']
+        settled = scalar * value_reveal
+        readout['value_label'].set_text(f'{settled:+.2f}')
+        readout['value_label'].set_alpha(float(value_reveal))
+        readout['value_caption'].set_alpha(float(value_reveal * 0.85))
 
 
 # ---------- Saving ----------
@@ -816,6 +869,11 @@ def parse_args():
     p.add_argument('--width',  type=int, default=960)
     p.add_argument('--height', type=int, default=540)
     p.add_argument('--output-dir', default='media')
+    p.add_argument('--layout', choices=sorted(LAYOUTS.keys()),
+                   default='full',
+                   help='Composition preset. "portfolio" removes the '
+                        'internal title, readout, and chess board, then '
+                        'positions the network around project-card overlays.')
     p.add_argument('--palette', choices=sorted(PALETTES.keys()),
                    default='terminal',
                    help='Color scheme: "terminal" matches the vmd306.com '
@@ -825,6 +883,11 @@ def parse_args():
     p.add_argument('--suffix', default='',
                    help='Optional filename suffix, e.g. "_redblue" to keep '
                         'multiple palettes side by side in media/.')
+    p.add_argument('--output-name', default='network',
+                   help='Base filename stem for MP4/WebM/GIF outputs.')
+    p.add_argument('--poster-name', default=None,
+                   help='Poster filename stem. Defaults to '
+                        '"<output-name>_poster".')
     p.add_argument('--no-mp4',  action='store_true')
     p.add_argument('--no-webm', action='store_true')
     p.add_argument('--no-gif',  action='store_true')
@@ -851,6 +914,8 @@ def main():
         pal['title_family'], pal['title_style'],
         pal['title_weight'], pal['title_caps'])
     print(f'[info] Palette: {args.palette}')
+    layout = LAYOUTS[args.layout]
+    print(f'[info] Layout: {layout.name}')
 
     board = chess.Board(args.fen)
     if args.moves:
@@ -871,7 +936,13 @@ def main():
     captures = capture_activations(model, board_t, move_t)
     board_tensor = board_t[0].cpu().numpy().transpose(1, 2, 0)
     layers = build_layer_specs(captures, board_tensor)
-    position_layers(layers, rng)
+    position_layers(
+        layers, rng,
+        x_left=layout.layer_x_left,
+        x_right=layout.layer_x_right,
+        y_low=layout.layer_y_low,
+        y_high=layout.layer_y_high,
+    )
 
     synapses = build_synapses(layers, rng)
     sparks   = pick_sparks(layers, synapses)
@@ -879,16 +950,20 @@ def main():
     print(f'[info] Layers: {len(layers)} | synapse gaps: {len(synapses)}')
 
     fig, ax = setup_figure(args.width, args.height)
-    draw_static_chrome(ax, layers, board, used_random_init)
+    draw_static_chrome(
+        ax, layers, board, used_random_init, layout, args.width, args.height,
+    )
 
     policy_spec = next(L for L in layers if L.name == 'policy')
     value_spec  = next(L for L in layers if L.name == 'value')
 
-    readout = draw_readout(
-        ax, policy_spec,
-        value_spec.scalar,                                  # type: ignore[attr-defined]
-        board, flip,
-    )
+    readout = None
+    if layout.show_readout:
+        readout = draw_readout(
+            ax, policy_spec,
+            value_spec.scalar,                              # type: ignore[attr-defined]
+            board, flip,
+        )
 
     node_artists    = init_node_artists(ax, layers)
     synapse_lcs     = init_synapse_artists(ax, synapses)
@@ -903,24 +978,27 @@ def main():
     frames = render_all_frames(ax, fig, args.frames, update)
 
     sfx = args.suffix
+    output_stem = f'{args.output_name}{sfx}'
+    poster_base = args.poster_name or f'{args.output_name}_poster'
+    poster_stem = f'{poster_base}{sfx}'
     poster_idx = min(len(frames) - 1, int(0.83 * args.frames))
-    poster_path = out_dir / f'network_poster{sfx}.png'
+    poster_path = out_dir / f'{poster_stem}.png'
     save_poster(frames[poster_idx], poster_path)
     _report(poster_path)
 
     if not args.no_mp4:
-        mp4_path = out_dir / f'network{sfx}.mp4'
+        mp4_path = out_dir / f'{output_stem}.mp4'
         save_mp4(frames, mp4_path, fps=args.fps)
         _report(mp4_path)
     if not args.no_webm:
-        webm_path = out_dir / f'network{sfx}.webm'
+        webm_path = out_dir / f'{output_stem}.webm'
         try:
             save_webm(frames, webm_path, fps=args.fps)
             _report(webm_path)
         except Exception as exc:
             print(f'[warn] WebM encoding failed: {exc}')
     if not args.no_gif:
-        gif_path = out_dir / f'network{sfx}.gif'
+        gif_path = out_dir / f'{output_stem}.gif'
         save_gif(frames, gif_path, source_fps=args.fps)
         _report(gif_path)
 
