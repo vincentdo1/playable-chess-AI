@@ -13,11 +13,15 @@ import chess_player
 from load_model import load_trained_model, predict_next_move
 from neural_network import MODEL_PATH
 from search_player import search_best_move
+from mcts_player import mcts_search_best_move
 
 
 def _choose_move(player, board, magnus_model, magnus_temperature,
                  magnus_value_weight, magnus_value_candidates,
-                 alphabeta_depth, search_depth, search_time):
+                 alphabeta_depth, search_depth, search_time,
+                 mcts_simulations, mcts_c_puct, mcts_batch_size,
+                 mcts_policy_temperature, mcts_move_temperature,
+                 mcts_time):
     if player == 'magnus':
         uci = predict_next_move(
             magnus_model,
@@ -33,6 +37,17 @@ def _choose_move(player, board, magnus_model, magnus_temperature,
             board,
             max_depth=search_depth,
             time_limit=search_time,
+        )
+    if player == 'magnus_mcts':
+        return mcts_search_best_move(
+            magnus_model,
+            board,
+            num_simulations=mcts_simulations,
+            c_puct=mcts_c_puct,
+            batch_size=mcts_batch_size,
+            policy_temperature=mcts_policy_temperature,
+            move_temperature=mcts_move_temperature,
+            time_limit=mcts_time,
         )
     if player == 'alphabeta':
         return chess_player.alphabeta(board.turn, board, alphabeta_depth)
@@ -53,7 +68,10 @@ def _result_for_board(board, terminated_by_move_limit):
 def play_game(game_number, white_player, black_player, magnus_model,
               magnus_temperature, magnus_value_weight,
               magnus_value_candidates, alphabeta_depth,
-              search_depth, search_time, max_plies):
+              search_depth, search_time,
+              mcts_simulations, mcts_c_puct, mcts_batch_size,
+              mcts_policy_temperature, mcts_move_temperature, mcts_time,
+              max_plies):
     board = chess.Board()
     game = chess.pgn.Game()
     game.headers['Event'] = 'Magnus NN vs Alphabeta'
@@ -81,6 +99,12 @@ def play_game(game_number, white_player, black_player, magnus_model,
             alphabeta_depth,
             search_depth,
             search_time,
+            mcts_simulations,
+            mcts_c_puct,
+            mcts_batch_size,
+            mcts_policy_temperature,
+            mcts_move_temperature,
+            mcts_time,
         )
         if move is None or move not in board.legal_moves:
             game.headers['Termination'] = f'{player}_illegal_or_no_move'
@@ -101,6 +125,13 @@ def play_game(game_number, white_player, black_player, magnus_model,
     game.headers['SearchDepth'] = str(search_depth)
     if search_time is not None:
         game.headers['SearchTime'] = str(search_time)
+    game.headers['MCTSSimulations'] = str(mcts_simulations)
+    game.headers['MCTSCPuct'] = str(mcts_c_puct)
+    game.headers['MCTSBatchSize'] = str(mcts_batch_size)
+    game.headers['MCTSPolicyTemperature'] = str(mcts_policy_temperature)
+    game.headers['MCTSMoveTemperature'] = str(mcts_move_temperature)
+    if mcts_time is not None:
+        game.headers['MCTSTime'] = str(mcts_time)
     return game, result
 
 
@@ -123,6 +154,20 @@ def main():
     parser.add_argument('--search_time', type=float, default=None,
                         help='Seconds per move for magnus_search '
                              '(stops iterative deepening early).')
+    parser.add_argument('--mcts_simulations', type=int, default=400,
+                        help='Total PUCT simulations per move for magnus_mcts.')
+    parser.add_argument('--mcts_c_puct', type=float, default=1.5,
+                        help='PUCT exploration constant.')
+    parser.add_argument('--mcts_batch_size', type=int, default=8,
+                        help='Leaves per batched NN forward pass.')
+    parser.add_argument('--mcts_policy_temperature', type=float, default=1.5,
+                        help='Softening applied to policy logits before using '
+                             'them as PUCT priors (>1 softens a peaky policy).')
+    parser.add_argument('--mcts_move_temperature', type=float, default=0.0,
+                        help='Sampling temperature on root visits. 0 = greedy.')
+    parser.add_argument('--mcts_time', type=float, default=None,
+                        help='Seconds-per-move cap for magnus_mcts; stops early '
+                             'even if --mcts_simulations is not yet reached.')
     parser.add_argument('--max_plies', type=int, default=160)
     parser.add_argument('--model', default=MODEL_PATH)
     parser.add_argument('--output_dir', default='analysis_games')
@@ -130,13 +175,13 @@ def main():
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument(
         '--white',
-        choices=('magnus', 'magnus_search', 'alphabeta', 'random'),
+        choices=('magnus', 'magnus_search', 'magnus_mcts', 'alphabeta', 'random'),
         default=None,
         help='Override white player (otherwise uses --magnus_color rotation).',
     )
     parser.add_argument(
         '--black',
-        choices=('magnus', 'magnus_search', 'alphabeta', 'random'),
+        choices=('magnus', 'magnus_search', 'magnus_mcts', 'alphabeta', 'random'),
         default=None,
         help='Override black player (otherwise uses --magnus_color rotation).',
     )
@@ -180,6 +225,12 @@ def main():
                 args.alphabeta_depth,
                 args.search_depth,
                 args.search_time,
+                args.mcts_simulations,
+                args.mcts_c_puct,
+                args.mcts_batch_size,
+                args.mcts_policy_temperature,
+                args.mcts_move_temperature,
+                args.mcts_time,
                 args.max_plies,
             )
             results[result] = results.get(result, 0) + 1
