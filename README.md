@@ -3,18 +3,10 @@
 A playable chess application featuring multiple AI players including a neural network trained on Magnus Carlsen's games. Available as a desktop app and a web interface.
 
 <p align="center">
-  <video autoplay loop muted playsinline preload="metadata"
-         poster="media/network_poster.png"
-         width="720" style="max-width:100%;height:auto;">
-    <source src="media/network.webm" type="video/webm">
-    <source src="media/network.mp4"  type="video/mp4">
-    <img src="media/network.gif" alt="Chess CNN+LSTM forward pass" width="720">
-  </video>
+  <img src="media/network.gif" alt="CNN+LSTM forward pass" width="720">
   <br/>
-  <em>Forward pass of the trained CNN + LSTM on a real position. Generate with <code>python scripts/visualize_network.py</code>.</em>
+  <em>Forward pass of the trained CNN + LSTM on a real position. <a href="media/network.mp4">MP4</a></em>
 </p>
-
-> GitHub's markdown renderer strips `<video>` so READMEs show the GIF fallback; portfolio sites that allow raw HTML get the smaller MP4/WebM with poster.
 
 ---
 

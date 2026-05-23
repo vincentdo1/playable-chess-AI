@@ -1,5 +1,3 @@
-# Visualization-only dependencies for scripts/visualize_network.py
-# Separate from requirements-local.txt so server deploys stay slim.
 matplotlib>=3.8
 Pillow>=10.0
 imageio>=2.34
