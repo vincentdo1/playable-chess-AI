@@ -59,7 +59,7 @@ class SearchStats:
 class NNEvaluator:
     """Single point of contact with the network; caches by Zobrist hash.
 
-    Returns (policy_logits over 20160 classes, value in [-1, 1] from side-to-move).
+    Returns (policy_logits over MOVE_VOCAB_SIZE classes, value in [-1, 1] from side-to-move).
     Positions repeat constantly in alpha-beta (move ordering revisits the root,
     transposition collisions, qsearch back-references), so caching matters.
     """

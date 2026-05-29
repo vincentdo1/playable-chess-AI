@@ -367,7 +367,27 @@ def run_loop(
     start_iteration: int = 1,
     seed: int | None = None,
 ) -> None:
-    if training_config.init_checkpoint:
+    # Resume safety: when continuing from a later iteration without an explicit
+    # init checkpoint, load the *previous* iteration's self-play checkpoint
+    # rather than silently falling back to the supervised model (which would
+    # throw away all self-play progress and overwrite the iteration files).
+    resume_ckpt = None
+    if start_iteration > 1 and not training_config.init_checkpoint:
+        resume_ckpt = os.path.join(
+            training_config.checkpoint_dir,
+            f'selfplay_iter{start_iteration - 1:04d}.pt',
+        )
+        if not os.path.exists(resume_ckpt):
+            raise FileNotFoundError(
+                f"--start_iteration {start_iteration} implies resuming, but the "
+                f"previous checkpoint {resume_ckpt!r} was not found. Pass "
+                "--init_checkpoint explicitly, or start from iteration 1."
+            )
+
+    if resume_ckpt is not None:
+        print(f"Resuming from self-play checkpoint {resume_ckpt}")
+        model = load_trained_model(resume_ckpt)
+    elif training_config.init_checkpoint:
         model = load_trained_model(training_config.init_checkpoint)
     elif os.path.exists(MODEL_PATH):
         print(f"Bootstrapping from supervised checkpoint at {MODEL_PATH}")
