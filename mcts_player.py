@@ -165,17 +165,23 @@ def _batched_eval(model: ChessModel, boards: list[chess.Board]):
         torch.from_numpy(np.stack(board_arrays))
         .float()
         .permute(0, 3, 1, 2)
-        .to(device)
+        .contiguous()
+        .to(device, non_blocking=device.type == 'cuda')
     )
     move_batch = (
         torch.from_numpy(np.stack(move_arrays))
         .float()
-        .to(device)
+        .to(device, non_blocking=device.type == 'cuda')
     )
 
-    with torch.no_grad():
+    with torch.inference_mode(), torch.amp.autocast(
+        device.type, enabled=device.type == 'cuda'
+    ):
         policy_logits, values = model(board_batch, move_batch)
-    return policy_logits.detach().cpu().numpy(), values.detach().cpu().numpy()
+    return (
+        policy_logits.float().detach().cpu().numpy(),
+        values.float().detach().cpu().numpy(),
+    )
 
 
 def _descend_to_leaf(root: MCTSNode, root_board: chess.Board, c_puct: float):

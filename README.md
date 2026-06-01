@@ -210,14 +210,21 @@ This takes 20-30 minutes and saves chunks to `data/train_chunks/`, `data/val_chu
 
 ### Step 2 - Train the model
 
+First verify that the Python environment you are about to use can see CUDA:
+```
+$env:REQUIRE_CUDA = "1"
+python check_training_env.py
+```
+
 ```
 $env:TRAIN_DIR = "data/train_chunks_perspective_v2"
 $env:VAL_DIR = "data/val_chunks_perspective_v2"
 $env:MODEL_PATH = "model/grandmaster_model_perspective_resnet_v2.pt"
+$env:REQUIRE_CUDA = "1"
 python neural_network.py
 ```
 
-Training runs for up to 50 epochs with early stopping. On an RTX 3070, each epoch takes longer than the old two-layer CNN because the model now uses a padded residual tower. Set `MODEL_PATH` to the checkpoint name you want; without it, training defaults to `model/grandmaster_model_perspective_resnet_negatives_v2.pt`. Avoid warm-starting from old absolute-channel checkpoints unless you are only doing a quick experiment; the board encoding and trunk architecture changed.
+Training runs for up to 50 epochs with early stopping. On an RTX 3070, each epoch takes longer than the old two-layer CNN because the model now uses a padded residual tower. `REQUIRE_CUDA=1` makes training fail immediately instead of silently falling back to CPU. Set `TRAIN_LOG_INTERVAL` to control batch progress logging. Set `MODEL_PATH` to the checkpoint name you want; without it, training defaults to `model/grandmaster_model_perspective_resnet_negatives_v2.pt`. Avoid warm-starting from old absolute-channel checkpoints unless you are only doing a quick experiment; the board encoding and trunk architecture changed.
 
 To train on the original GM/Magnus chunks plus the Lichess negative-example chunks, use `TRAIN_DIRS` separated by semicolons on Windows:
 ```

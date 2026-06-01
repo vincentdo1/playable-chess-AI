@@ -18,6 +18,7 @@
 #   ./train_pipeline.sh                 # full run with defaults
 #   STOCKFISH_PATH=/usr/bin/stockfish ./train_pipeline.sh   # better value targets
 #   SKIP_PREPROCESS=1 ./train_pipeline.sh                   # reuse existing chunks
+#   REQUIRE_CUDA=0 ./train_pipeline.sh                      # CPU smoke test only
 #
 set -euo pipefail
 
@@ -33,8 +34,30 @@ export EPOCHS="${EPOCHS:-50}"
 export BATCH_SIZE="${BATCH_SIZE:-512}"
 export RESIDUAL_FILTERS="${RESIDUAL_FILTERS:-128}"
 export RESIDUAL_BLOCKS="${RESIDUAL_BLOCKS:-8}"
+export TRAIN_LOG_INTERVAL="${TRAIN_LOG_INTERVAL:-100}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+# Full training on CPU looks like a hang. Keep this on unless you are doing a
+# deliberately tiny CPU smoke test with MAX_TRAIN_BATCHES/MAX_VAL_BATCHES.
+export REQUIRE_CUDA="${REQUIRE_CUDA:-1}"
 
-PYTHON="${PYTHON:-python3}"
+if [ -z "${PYTHON:-}" ]; then
+  if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/Scripts/python.exe" ]; then
+    PYTHON="$VIRTUAL_ENV/Scripts/python.exe"
+  elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+    PYTHON="$VIRTUAL_ENV/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON="python"
+  else
+    echo "No Python executable found. Set PYTHON=/path/to/python and rerun."
+    exit 1
+  fi
+fi
+
+if [ "${SKIP_ENV_CHECK:-0}" != "1" ]; then
+  $PYTHON check_training_env.py
+fi
 
 # --- Stage 1: preprocess -----------------------------------------------------
 # If a real Stockfish binary is on STOCKFISH_PATH, value targets come from engine
