@@ -3,6 +3,8 @@
 import os
 import glob
 import random
+import sys
+import time
 
 import numpy as np
 import chess
@@ -29,6 +31,18 @@ NEGATIVE_POLICY_LOSS_WEIGHT = float(os.environ.get(
 ))
 TRAIN_NUM_WORKERS = int(os.environ.get('TRAIN_NUM_WORKERS', '4'))
 VAL_NUM_WORKERS = int(os.environ.get('VAL_NUM_WORKERS', '2'))
+PREFETCH_FACTOR = int(os.environ.get('DATALOADER_PREFETCH_FACTOR', '2'))
+TRAIN_LOG_INTERVAL = int(os.environ.get('TRAIN_LOG_INTERVAL', '100'))
+
+
+def _env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {'1', 'true', 'yes', 'on'}
+
+
+REQUIRE_CUDA = _env_flag('REQUIRE_CUDA', default=False)
 
 def _optional_int_env(name):
     value = os.environ.get(name)
@@ -40,11 +54,57 @@ SAVE_MODEL = os.environ.get('SAVE_MODEL', '1').lower() not in {
     '0', 'false', 'no'
 }
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-if __name__ == '__main__':
-    print(f"Using device: {DEVICE}")
+def _select_device():
+    requested = os.environ.get('TORCH_DEVICE')
+    if requested:
+        device = torch.device(requested)
+        if device.type == 'cuda' and not torch.cuda.is_available():
+            raise RuntimeError(
+                f"TORCH_DEVICE={requested!r} was requested, but this Python "
+                "environment reports torch.cuda.is_available() == False. "
+                "Install a CUDA-enabled PyTorch build and run the pipeline "
+                "from that environment."
+            )
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    if device.type == 'cuda':
+        if device.index is not None:
+            torch.cuda.set_device(device)
+        torch.backends.cudnn.benchmark = True
+    return device
+
+
+DEVICE = _select_device()
+NON_BLOCKING = DEVICE.type == 'cuda'
+
+
+def assert_training_device():
+    if REQUIRE_CUDA and DEVICE.type != 'cuda':
+        raise RuntimeError(
+            "REQUIRE_CUDA=1, but this Python environment cannot use CUDA. "
+            "The training pipeline would fall back to CPU and take far too "
+            "long. Install CUDA-enabled PyTorch or run with REQUIRE_CUDA=0 "
+            "only for a small CPU smoke test."
+        )
+
+
+def print_device_info():
+    print(f"Using device: {DEVICE}", flush=True)
+    print(f"  Python: {sys.executable}", flush=True)
+    print(f"  PyTorch: {torch.__version__}", flush=True)
+    print(f"  torch.version.cuda: {torch.version.cuda}", flush=True)
     if DEVICE.type == 'cuda':
-        print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        idx = DEVICE.index if DEVICE.index is not None else torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(idx)
+        gib = props.total_memory / (1024 ** 3)
+        print(f"  GPU {idx}: {props.name} ({gib:.1f} GiB VRAM)", flush=True)
+        print(f"  cuDNN: {torch.backends.cudnn.version()}", flush=True)
+    else:
+        print(
+            "  CUDA unavailable: training will be extremely slow on CPU.",
+            flush=True,
+        )
 
 BOARD_ENCODING_VERSION = 'perspective_v2'
 
@@ -201,7 +261,11 @@ class ChunkDataset(torch.utils.data.IterableDataset):
         for path in self.chunk_paths:
             with np.load(path) as data:
                 total += len(data['boards'])
-        print(f"Found {len(self.chunk_paths)} chunks in {chunk_dir}  ({total:,} positions)")
+        print(
+            f"Found {len(self.chunk_paths)} chunks in {chunk_dir}  "
+            f"({total:,} positions)",
+            flush=True,
+        )
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -259,37 +323,40 @@ class ChunkDataset(torch.utils.data.IterableDataset):
                 )
             indices = np.random.permutation(len(boards)) if self.shuffle else np.arange(len(boards))
             for i in indices:
-                board = torch.tensor(boards[i],  dtype=torch.float32).permute(2, 0, 1)
-                move  = torch.tensor(moves[i],   dtype=torch.float32)
-                target = torch.tensor(move_idx[i], dtype=torch.long)
                 start = legal_move_offsets[i]
                 end = legal_move_offsets[i + 1]
-                legal = torch.tensor(legal_move_indices[start:end], dtype=torch.long)
                 weight_value = 1.0 if sample_weight is None else sample_weight[i]
-                weight = torch.tensor(weight_value, dtype=torch.float32)
-                value = torch.tensor(value_target[i], dtype=torch.float32)
                 target_type_value = (
                     POLICY_TARGET_POSITIVE if policy_target_type is None
                     else policy_target_type[i]
                 )
-                target_type = torch.tensor(target_type_value, dtype=torch.int8)
-                yield board, move, target, legal, weight, value, target_type
+                yield (
+                    boards[i],
+                    moves[i],
+                    np.int64(move_idx[i]),
+                    legal_move_indices[start:end],
+                    np.float32(weight_value),
+                    np.float32(value_target[i]),
+                    np.int8(target_type_value),
+                )
 
 def collate_policy_batch(batch):
     boards, moves, targets, legal_indices, weights, values, target_types = zip(*batch)
+    targets = torch.as_tensor(targets, dtype=torch.long)
     legal_mask = torch.zeros((len(batch), MOVE_VOCAB_SIZE), dtype=torch.bool)
     for row, indices in enumerate(legal_indices):
+        indices = torch.as_tensor(indices, dtype=torch.long)
         legal_mask[row, indices] = True
-        if not legal_mask[row, targets[row]]:
+        if not bool(legal_mask[row, targets[row]]):
             raise ValueError("Training target is missing from its legal move mask.")
     return (
-        torch.stack(boards),
-        torch.stack(moves),
-        torch.stack(targets),
+        torch.from_numpy(np.stack(boards)).float().permute(0, 3, 1, 2).contiguous(),
+        torch.from_numpy(np.stack(moves)).float(),
+        targets,
         legal_mask,
-        torch.stack(weights),
-        torch.stack(values),
-        torch.stack(target_types),
+        torch.as_tensor(weights, dtype=torch.float32),
+        torch.as_tensor(values, dtype=torch.float32),
+        torch.as_tensor(target_types, dtype=torch.int8),
     )
 
 def mask_illegal_logits(policy_logits, legal_mask):
@@ -305,6 +372,10 @@ def policy_loss_for_targets(masked_logits, move_idx, target_type):
     bad_move_prob = target_log_prob.exp().clamp(max=1.0 - 1e-6)
     negative_loss = -torch.log1p(-bad_move_prob) * NEGATIVE_POLICY_LOSS_WEIGHT
     return torch.where(target_type < 0, negative_loss, positive_loss)
+
+
+def _to_device(tensor, device):
+    return tensor.to(device, non_blocking=NON_BLOCKING)
 
 # Model
 
@@ -373,17 +444,18 @@ def train_one_epoch(model, loader, optimizer, scaler, value_criterion,
     total_loss = total_policy_loss = total_value_loss = 0.0
     total_value_abs_error = total_weight = 0.0
     correct = total = positive_total = negative_total = 0
+    start_time = time.monotonic()
     for batch_idx, batch in enumerate(loader):
         if max_batches is not None and batch_idx >= max_batches:
             break
         boards, moves, move_idx, legal_mask, sample_weight, value_target, target_type = batch
-        boards = boards.to(device)
-        moves = moves.to(device)
-        move_idx = move_idx.to(device)
-        legal_mask = legal_mask.to(device)
-        sample_weight = sample_weight.to(device)
-        value_target = value_target.to(device)
-        target_type = target_type.to(device)
+        boards = _to_device(boards, device)
+        moves = _to_device(moves, device)
+        move_idx = _to_device(move_idx, device)
+        legal_mask = _to_device(legal_mask, device)
+        sample_weight = _to_device(sample_weight, device)
+        value_target = _to_device(value_target, device)
+        target_type = _to_device(target_type, device)
         optimizer.zero_grad()
         with torch.amp.autocast(device.type, enabled=device.type == 'cuda'):
             policy_logits, value_pred = model(boards, moves)
@@ -419,6 +491,18 @@ def train_one_epoch(model, loader, optimizer, scaler, value_criterion,
         positive_total += positive_mask.sum().item()
         negative_total += negative_mask.sum().item()
         total += n
+        if TRAIN_LOG_INTERVAL and (
+            batch_idx == 0 or (batch_idx + 1) % TRAIN_LOG_INTERVAL == 0
+        ):
+            elapsed = max(time.monotonic() - start_time, 1e-6)
+            samples_per_sec = total / elapsed
+            avg_loss = total_loss / max(total_weight, 1e-6)
+            print(
+                f"    train batch {batch_idx + 1:,} | "
+                f"samples={total:,} | loss={avg_loss:.4f} | "
+                f"{samples_per_sec:,.0f} samples/s",
+                flush=True,
+            )
     if total == 0:
         raise RuntimeError("No training batches were produced by the DataLoader.")
     return {
@@ -437,17 +521,18 @@ def evaluate(model, loader, value_criterion, device, max_batches=None):
     total_loss = total_policy_loss = total_value_loss = 0.0
     total_value_abs_error = total_weight = 0.0
     correct = total = positive_total = negative_total = 0
+    start_time = time.monotonic()
     for batch_idx, batch in enumerate(loader):
         if max_batches is not None and batch_idx >= max_batches:
             break
         boards, moves, move_idx, legal_mask, sample_weight, value_target, target_type = batch
-        boards = boards.to(device)
-        moves = moves.to(device)
-        move_idx = move_idx.to(device)
-        legal_mask = legal_mask.to(device)
-        sample_weight = sample_weight.to(device)
-        value_target = value_target.to(device)
-        target_type = target_type.to(device)
+        boards = _to_device(boards, device)
+        moves = _to_device(moves, device)
+        move_idx = _to_device(move_idx, device)
+        legal_mask = _to_device(legal_mask, device)
+        sample_weight = _to_device(sample_weight, device)
+        value_target = _to_device(value_target, device)
+        target_type = _to_device(target_type, device)
         with torch.amp.autocast(device.type, enabled=device.type == 'cuda'):
             policy_logits, value_pred = model(boards, moves)
             masked_logits = mask_illegal_logits(policy_logits, legal_mask)
@@ -478,6 +563,18 @@ def evaluate(model, loader, value_criterion, device, max_batches=None):
         positive_total += positive_mask.sum().item()
         negative_total += negative_mask.sum().item()
         total += n
+        if TRAIN_LOG_INTERVAL and (
+            batch_idx == 0 or (batch_idx + 1) % TRAIN_LOG_INTERVAL == 0
+        ):
+            elapsed = max(time.monotonic() - start_time, 1e-6)
+            samples_per_sec = total / elapsed
+            avg_loss = total_loss / max(total_weight, 1e-6)
+            print(
+                f"    val batch {batch_idx + 1:,} | "
+                f"samples={total:,} | loss={avg_loss:.4f} | "
+                f"{samples_per_sec:,.0f} samples/s",
+                flush=True,
+            )
     if total == 0:
         raise RuntimeError("No validation batches were produced by the DataLoader.")
     return {
@@ -504,31 +601,39 @@ def load_compatible_state_dict(model, checkpoint):
     return result, skipped
 
 def main():
+    assert_training_device()
+    print_device_info()
+
     model_dir = os.path.dirname(MODEL_PATH)
     if model_dir:
         os.makedirs(model_dir, exist_ok=True)
 
-    print("Loading training dataset...")
+    print("Loading training dataset...", flush=True)
     train_ds = ChunkDataset(TRAIN_DIR, shuffle=True)
-    print("Loading validation dataset...")
+    print("Loading validation dataset...", flush=True)
     val_ds   = ChunkDataset(VAL_DIR,   shuffle=False)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=BATCH_SIZE,
-        num_workers=TRAIN_NUM_WORKERS,
-        pin_memory=DEVICE.type == 'cuda',
-        persistent_workers=TRAIN_NUM_WORKERS > 0,
-        collate_fn=collate_policy_batch,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=BATCH_SIZE,
-        num_workers=VAL_NUM_WORKERS,
-        pin_memory=DEVICE.type == 'cuda',
-        persistent_workers=VAL_NUM_WORKERS > 0,
-        collate_fn=collate_policy_batch,
-    )
+    train_loader_kwargs = {
+        'batch_size': BATCH_SIZE,
+        'num_workers': TRAIN_NUM_WORKERS,
+        'pin_memory': DEVICE.type == 'cuda',
+        'persistent_workers': TRAIN_NUM_WORKERS > 0,
+        'collate_fn': collate_policy_batch,
+    }
+    if TRAIN_NUM_WORKERS > 0:
+        train_loader_kwargs['prefetch_factor'] = PREFETCH_FACTOR
+    train_loader = DataLoader(train_ds, **train_loader_kwargs)
+
+    val_loader_kwargs = {
+        'batch_size': BATCH_SIZE,
+        'num_workers': VAL_NUM_WORKERS,
+        'pin_memory': DEVICE.type == 'cuda',
+        'persistent_workers': VAL_NUM_WORKERS > 0,
+        'collate_fn': collate_policy_batch,
+    }
+    if VAL_NUM_WORKERS > 0:
+        val_loader_kwargs['prefetch_factor'] = PREFETCH_FACTOR
+    val_loader = DataLoader(val_ds, **val_loader_kwargs)
 
     model     = ChessModel().to(DEVICE)
     if INIT_MODEL_PATH:
@@ -551,22 +656,24 @@ def main():
     )
     scaler = torch.amp.GradScaler('cuda', enabled=DEVICE.type == 'cuda')
 
-    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"Board encoding: {BOARD_ENCODING_VERSION}")
-    print(f"Residual tower: {RESIDUAL_BLOCKS} blocks x {RESIDUAL_FILTERS} filters")
-    print(f"Batch size : {BATCH_SIZE}  |  Max epochs : {EPOCHS}")
-    print(f"Value loss weight: {VALUE_LOSS_WEIGHT}\n")
-    print(f"Negative policy loss weight: {NEGATIVE_POLICY_LOSS_WEIGHT}\n")
+    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
+    print(f"Board encoding: {BOARD_ENCODING_VERSION}", flush=True)
+    print(f"Residual tower: {RESIDUAL_BLOCKS} blocks x {RESIDUAL_FILTERS} filters", flush=True)
+    print(f"Batch size : {BATCH_SIZE}  |  Max epochs : {EPOCHS}", flush=True)
+    print(f"Train workers: {TRAIN_NUM_WORKERS}  |  Val workers: {VAL_NUM_WORKERS}", flush=True)
+    print(f"Progress interval: every {TRAIN_LOG_INTERVAL} batches", flush=True)
+    print(f"Value loss weight: {VALUE_LOSS_WEIGHT}\n", flush=True)
+    print(f"Negative policy loss weight: {NEGATIVE_POLICY_LOSS_WEIGHT}\n", flush=True)
     if MAX_TRAIN_BATCHES is not None or MAX_VAL_BATCHES is not None:
         print(f"Debug batch limits: train={MAX_TRAIN_BATCHES}  "
-              f"val={MAX_VAL_BATCHES}\n")
+              f"val={MAX_VAL_BATCHES}\n", flush=True)
 
     best_val_loss       = float('inf')
     patience_count      = 0
     EARLY_STOP_PATIENCE = 5
 
     for epoch in range(1, EPOCHS + 1):
-        print(f"Epoch {epoch}/{EPOCHS}")
+        print(f"Epoch {epoch}/{EPOCHS}", flush=True)
         train_metrics = train_one_epoch(
             model, train_loader, optimizer, scaler, value_criterion, DEVICE,
             max_batches=MAX_TRAIN_BATCHES)
@@ -580,7 +687,8 @@ def main():
             f"value_mae={train_metrics['value_mae']:.4f}  "
             f"move_acc={train_metrics['move_acc']:.4f}  "
             f"pos={train_metrics['positive_samples']:,}  "
-            f"neg={train_metrics['negative_samples']:,}"
+            f"neg={train_metrics['negative_samples']:,}",
+            flush=True,
         )
         print(
             f"  val    loss={val_metrics['loss']:.4f}  "
@@ -589,7 +697,8 @@ def main():
             f"value_mae={val_metrics['value_mae']:.4f}  "
             f"move_acc={val_metrics['move_acc']:.4f}  "
             f"pos={val_metrics['positive_samples']:,}  "
-            f"neg={val_metrics['negative_samples']:,}"
+            f"neg={val_metrics['negative_samples']:,}",
+            flush=True,
         )
         scheduler.step(val_metrics['loss'])
         if val_metrics['loss'] < best_val_loss:
@@ -610,21 +719,21 @@ def main():
                     'value_loss_weight':    VALUE_LOSS_WEIGHT,
                     'negative_policy_loss_weight': NEGATIVE_POLICY_LOSS_WEIGHT,
                 }, MODEL_PATH)
-                print(f"  Saved best model (val_loss={best_val_loss:.4f})")
+                print(f"  Saved best model (val_loss={best_val_loss:.4f})", flush=True)
             else:
                 print(f"  SAVE_MODEL=0, skipped checkpoint "
-                      f"(val_loss={best_val_loss:.4f})")
+                      f"(val_loss={best_val_loss:.4f})", flush=True)
         else:
             patience_count += 1
-            print(f"  No improvement ({patience_count}/{EARLY_STOP_PATIENCE})")
+            print(f"  No improvement ({patience_count}/{EARLY_STOP_PATIENCE})", flush=True)
             if patience_count >= EARLY_STOP_PATIENCE:
-                print(f"\nEarly stopping at epoch {epoch}.")
+                print(f"\nEarly stopping at epoch {epoch}.", flush=True)
                 break
 
     if SAVE_MODEL:
-        print(f"\nTraining complete. Best model saved to: {MODEL_PATH}")
+        print(f"\nTraining complete. Best model saved to: {MODEL_PATH}", flush=True)
     else:
-        print("\nTraining complete. SAVE_MODEL=0, no checkpoint written.")
+        print("\nTraining complete. SAVE_MODEL=0, no checkpoint written.", flush=True)
 
 if __name__ == '__main__':
     main()
