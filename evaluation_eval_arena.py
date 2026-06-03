@@ -1,20 +1,9 @@
-"""Head-to-head evaluation between two checkpoints, with an Elo estimate.
+"""Head-to-head evaluation between two checkpoints with Elo + 95% CI.
 
-Upgrades over the original single-startpos arena:
-  * Opening suite: games start from a set of diverse opening lines instead of
-    only the initial position, so a strength edge in one structure does not
-    dominate the result. A built-in suite of common openings is the default;
-    pass --openings <file> with one opening per line (UCI moves separated by
-    spaces, e.g. "e2e4 e7e5 g1f3") to supply your own.
-  * Paired games: each opening is played TWICE with colors swapped, and both
-    games count. This cancels first-move/color advantage and opening-side
-    advantage at the level of every pair, which is the cleanest way to make a
-    20-game match actually informative when play is near-deterministic.
-  * Same Elo + 95% CI reporting as before; --no_openings reproduces the old
-    start-from-initial behavior for backward compatibility.
-
-Methods per side: 'mcts' (search), 'policy' (single forward pass, temperature
-sampling), or 'search' (alpha-beta with the network as evaluator).
+Plays a paired opening suite (each opening twice with colors swapped, opening
+order reshuffled per cycle and seeds bumped so repeats diverge). --no_paired
+falls back to single games per opening; --no_openings starts every game from
+the initial position. Methods per side: mcts, policy, or search.
 """
 
 from __future__ import annotations

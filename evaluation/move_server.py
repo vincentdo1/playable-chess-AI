@@ -58,7 +58,7 @@ def main() -> int:
 
     mcts_fn = None
     try:
-        from mcts_player import mcts_search_best_move
+        from inference.mcts_player import mcts_search_best_move
         mcts_fn = mcts_search_best_move
     except ImportError:
         pass

@@ -37,7 +37,7 @@ import chess
 def make_move_fn(method, sims, batch_size, temperature, value_weight, value_candidates):
     """Return f(model, board) -> chess.Move. Imports torch-side lazily."""
     if method == 'mcts':
-        from mcts_player import mcts_search_best_move
+        from inference.mcts_player import mcts_search_best_move
 
         def fn(model, board):
             return mcts_search_best_move(

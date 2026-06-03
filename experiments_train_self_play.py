@@ -1,25 +1,8 @@
-"""AlphaZero-style iteration loop: self-play, replay-buffer training, repeat.
+"""AlphaZero-style iteration loop: self-play -> replay buffer -> train -> repeat.
 
-Each iteration:
-  1. The current network plays ``games_per_iteration`` self-play games. Every
-     position visited becomes a training sample whose policy target is the MCTS
-     visit distribution and whose value target is the eventual game outcome.
-  2. The new samples are added to a fixed-size replay buffer (oldest chunks
-     evicted once it overflows).
-  3. The network is trained for ``training_steps_per_iteration`` mini-batch
-     steps on uniformly-sampled positions from the buffer.
-  4. A checkpoint is saved and the next iteration begins with the updated net.
-
-What this script does *not* do (intentionally, to keep it tractable):
-  - Run self-play across multiple processes. One game at a time.
-  - Gate new checkpoints against the previous one via match play. AlphaGo Zero
-    did this; AlphaZero dropped it. We drop it too — the latest checkpoint is
-    always used for the next round of self-play.
-
-Numerical detail to keep in mind: the policy loss is the cross-entropy of the
-MCTS visit distribution against the model's softmax over *legal* moves only.
-Illegal moves are masked out of the softmax denominator before computing
-log-probabilities, matching how the network is used at inference.
+Single-process, latest-checkpoint-always (no match gating). Policy loss is
+cross-entropy of the MCTS visit distribution against the model's softmax over
+legal moves only.
 """
 
 from __future__ import annotations
@@ -42,9 +25,7 @@ from neural_network import (
     MOVE_VOCAB_SIZE,
     RESIDUAL_BLOCKS,
     RESIDUAL_FILTERS,
-    assert_training_device,
     mask_illegal_logits,
-    print_device_info,
 )
 from load_model import load_trained_model
 from experiments.self_play import SelfPlayConfig, generate_self_play_games
@@ -164,7 +145,6 @@ def distribution_train_step(
     value_loss_weight: float,
     grad_clip: float | None,
     device: torch.device,
-    scaler: torch.amp.GradScaler | None = None,
 ) -> dict:
     """One gradient step with MCTS visit-distribution policy targets.
 
@@ -173,51 +153,27 @@ def distribution_train_step(
     """
     model.train()
 
-    non_blocking = device.type == 'cuda'
-    boards = (
-        torch.from_numpy(batch['boards'])
-        .float()
-        .permute(0, 3, 1, 2)
-        .contiguous()
-        .to(device, non_blocking=non_blocking)
-    )
-    move_seqs = torch.from_numpy(batch['move_seqs']).float().to(
-        device, non_blocking=non_blocking
-    )
-    legal_mask = torch.from_numpy(batch['legal_mask']).to(
-        device, non_blocking=non_blocking
-    )
-    policy_target = torch.from_numpy(batch['policy_target']).float().to(
-        device, non_blocking=non_blocking
-    )
-    value_target = torch.from_numpy(batch['value_target']).float().to(
-        device, non_blocking=non_blocking
-    )
+    boards = torch.from_numpy(batch['boards']).float().permute(0, 3, 1, 2).to(device)
+    move_seqs = torch.from_numpy(batch['move_seqs']).float().to(device)
+    legal_mask = torch.from_numpy(batch['legal_mask']).to(device)
+    policy_target = torch.from_numpy(batch['policy_target']).float().to(device)
+    value_target = torch.from_numpy(batch['value_target']).float().to(device)
 
     optimizer.zero_grad()
 
-    with torch.amp.autocast(device.type, enabled=device.type == 'cuda'):
-        policy_logits, value_pred = model(boards, move_seqs)
-        masked_logits = mask_illegal_logits(policy_logits, legal_mask)
-        log_probs = torch.log_softmax(masked_logits.float(), dim=1)
-        # Only positions where target > 0 contribute; that subset is the set of
-        # legal moves with non-zero MCTS visit counts.
-        policy_loss = -(policy_target * log_probs).sum(dim=1).mean()
-        value_loss = ((value_pred.float() - value_target) ** 2).mean()
-        total = policy_loss + value_loss_weight * value_loss
+    policy_logits, value_pred = model(boards, move_seqs)
+    masked_logits = mask_illegal_logits(policy_logits, legal_mask)
+    log_probs = torch.log_softmax(masked_logits.float(), dim=1)
+    # Only positions where target > 0 contribute; that subset is the set of
+    # legal moves with non-zero MCTS visit counts.
+    policy_loss = -(policy_target * log_probs).sum(dim=1).mean()
+    value_loss = ((value_pred.float() - value_target) ** 2).mean()
+    total = policy_loss + value_loss_weight * value_loss
 
-    if scaler is not None and scaler.is_enabled():
-        scaler.scale(total).backward()
-        if grad_clip is not None and grad_clip > 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        total.backward()
-        if grad_clip is not None and grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
+    total.backward()
+    if grad_clip is not None and grad_clip > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    optimizer.step()
 
     with torch.no_grad():
         # Top-1 agreement: argmax of model legal-softmax vs argmax of MCTS visits.
@@ -268,7 +224,6 @@ def run_iteration(
     iteration: int,
     model: ChessModel,
     optimizer: torch.optim.Optimizer,
-    scaler: torch.amp.GradScaler,
     buffer: ReplayBuffer,
     self_play_config: SelfPlayConfig,
     training_config: TrainingConfig,
@@ -305,7 +260,6 @@ def run_iteration(
                 value_loss_weight=training_config.value_loss_weight,
                 grad_clip=training_config.grad_clip,
                 device=DEVICE,
-                scaler=scaler,
             )
             train_metrics.append(metrics)
             if (step + 1) % max(training_config.training_steps_per_iteration // 5, 1) == 0:
@@ -396,9 +350,6 @@ def run_loop(
     start_iteration: int = 1,
     seed: int | None = None,
 ) -> None:
-    assert_training_device()
-    print_device_info()
-
     # Resume safety: when continuing from a later iteration without an explicit
     # init checkpoint, load the *previous* iteration's self-play checkpoint
     # rather than silently falling back to the supervised model (which would
@@ -434,7 +385,6 @@ def run_loop(
         lr=training_config.learning_rate,
         weight_decay=training_config.weight_decay,
     )
-    scaler = torch.amp.GradScaler('cuda', enabled=DEVICE.type == 'cuda')
 
     buffer = ReplayBuffer(capacity=training_config.replay_buffer_capacity)
     if training_config.seed_buffer_from_dir:
@@ -445,7 +395,7 @@ def run_loop(
     for iteration in range(start_iteration, start_iteration + training_config.num_iterations):
         print(f"\n=== Iteration {iteration} ===")
         run_iteration(
-            iteration, model, optimizer, scaler, buffer,
+            iteration, model, optimizer, buffer,
             self_play_config, training_config,
             seed=(None if seed is None else seed + iteration),
         )

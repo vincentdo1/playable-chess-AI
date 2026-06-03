@@ -49,7 +49,7 @@ foreach ($m in $matrix) {
     Write-Host "`n=== Running $($m.Name) ===" -ForegroundColor Cyan
 
     $common = @(
-        "eval_arena.py",
+        "-m", "evaluation.eval_arena",
         "--model_a", $Resumed,
         "--model_b", $m.Opp,
         "--method_a", $m.Method,
