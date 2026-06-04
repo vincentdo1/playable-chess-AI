@@ -67,11 +67,18 @@ class MCTSNode:
         return self.visit_count + self.virtual_loss
 
     def q_value(self) -> float:
-        """Mean value from this node's side-to-move POV, penalised by virtual loss."""
+        """Mean value from this node's side-to-move POV, biased by virtual loss.
+
+        Virtual loss is ADDED here (not subtracted) on purpose: selection reads
+        this through negation (`-child.q_value()`), so inflating the child's own
+        value makes the move look *worse to the parent*. That is what steers
+        concurrent descents in a batch onto different paths. Subtracting would
+        invert the penalty and collapse the batch onto one path.
+        """
         n = self.total_n()
         if n == 0:
             return 0.0
-        return (self.value_sum - self.virtual_loss) / n
+        return (self.value_sum + self.virtual_loss) / n
 
 
 def _expand_node(node: MCTSNode, board: chess.Board,

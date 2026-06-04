@@ -190,6 +190,10 @@ export class ChessGameController {
       payload.temperature = this.config.magnus.temperature;
       payload.value_weight = this.config.magnus.valueWeight;
       payload.value_candidates = this.config.magnus.valueCandidates;
+      if (this.controls.getMagnusUseMcts()) {
+        payload.use_mcts = true;
+        payload.mcts_simulations = this.config.magnus.mctsSimulations;
+      }
     }
 
     return payload;

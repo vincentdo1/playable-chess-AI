@@ -42,7 +42,7 @@ $env:MAGNUS_MCTS_SIMULATIONS = "200"
 python app.py
 
 # 5. In a second terminal, serve the frontend
-python -m http.server 8000
+            
 ```
 
 Open `http://localhost:8000`. If Magnus is greyed out, the backend failed to load the model — check the backend terminal for `Magnus model unavailable: ...` and the listed reason.

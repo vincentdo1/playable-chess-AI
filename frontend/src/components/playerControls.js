@@ -9,6 +9,8 @@ export class PlayerControls {
     this.skillGroup = document.getElementById('skill-grp');
     this.skillSlider = document.getElementById('skill-sl');
     this.skillValue = document.getElementById('skill-val');
+    this.magnusGroup = document.getElementById('magnus-grp');
+    this.mctsToggle = document.getElementById('mcts-toggle');
   }
 
   bind() {
@@ -56,6 +58,10 @@ export class PlayerControls {
     return parseInt(this.skillSlider.value, 10);
   }
 
+  getMagnusUseMcts() {
+    return !!(this.mctsToggle && this.mctsToggle.checked);
+  }
+
   enableMagnus() {
     ['w', 'b'].forEach((color) => {
       const option = document.getElementById(`mo-${color}`);
@@ -68,7 +74,9 @@ export class PlayerControls {
   syncEngineOptions() {
     const usesAlphabeta = this.whitePlayer === 'alphabeta' || this.blackPlayer === 'alphabeta';
     const usesStockfish = this.whitePlayer === 'stockfish' || this.blackPlayer === 'stockfish';
+    const usesMagnus = this.whitePlayer === 'magnus' || this.blackPlayer === 'magnus';
     this.depthGroup.hidden = !usesAlphabeta;
     this.skillGroup.hidden = !usesStockfish;
+    if (this.magnusGroup) this.magnusGroup.hidden = !usesMagnus;
   }
 }
