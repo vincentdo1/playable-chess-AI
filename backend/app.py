@@ -19,6 +19,24 @@ DEFAULT_MAGNUS_TEMPERATURE = float(os.environ.get('MAGNUS_TEMPERATURE', '0.0'))
 DEFAULT_MAGNUS_VALUE_WEIGHT = float(os.environ.get('MAGNUS_VALUE_WEIGHT', '2.0'))
 DEFAULT_MAGNUS_VALUE_CANDIDATES = int(os.environ.get('MAGNUS_VALUE_CANDIDATES', '0'))
 
+
+# MCTS for /api/move magnus. Off by default; enable with MAGNUS_USE_MCTS=1.
+def _env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {'1', 'true', 'yes', 'on'}
+
+
+DEFAULT_MAGNUS_USE_MCTS = _env_flag('MAGNUS_USE_MCTS', default=False)
+DEFAULT_MAGNUS_MCTS_SIMULATIONS = int(os.environ.get('MAGNUS_MCTS_SIMULATIONS', '200'))
+# Hard ceiling on request-supplied sims so a public endpoint can't be forced
+# into unbounded CPU work. Raise via env if you run on stronger hardware.
+DEFAULT_MAGNUS_MCTS_MAX_SIMULATIONS = int(os.environ.get('MAGNUS_MCTS_MAX_SIMULATIONS', '800'))
+DEFAULT_MAGNUS_MCTS_BATCH = int(os.environ.get('MAGNUS_MCTS_BATCH', '16'))
+DEFAULT_MAGNUS_MCTS_C_PUCT = float(os.environ.get('MAGNUS_MCTS_C_PUCT', '1.5'))
+DEFAULT_MAGNUS_MCTS_POLICY_TEMP = float(os.environ.get('MAGNUS_MCTS_POLICY_TEMP', '1.5'))
+
 try:
     from load_model import MODEL_PATH, load_trained_model, predict_next_move
 
@@ -28,6 +46,17 @@ try:
     print(f"Magnus Carlsen model loaded: {_magnus_model_path}")
 except Exception as e:
     print(f"Magnus model unavailable: {e}")
+
+# Optional MCTS; falls back to raw policy if the module isn't importable.
+_mcts_fn = None
+try:
+    from inference.mcts_player import mcts_search_best_move as _mcts_fn
+    if DEFAULT_MAGNUS_USE_MCTS:
+        print(f"Magnus MCTS enabled: {DEFAULT_MAGNUS_MCTS_SIMULATIONS} sims/move")
+except Exception as e:
+    if DEFAULT_MAGNUS_USE_MCTS:
+        print(f"MAGNUS_USE_MCTS requested but mcts_player unavailable ({e}); "
+              "falling back to raw policy.")
 
 
 @app.route('/')
@@ -43,6 +72,9 @@ def health():
             'temperature': DEFAULT_MAGNUS_TEMPERATURE,
             'value_weight': DEFAULT_MAGNUS_VALUE_WEIGHT,
             'value_candidates': DEFAULT_MAGNUS_VALUE_CANDIDATES,
+            'use_mcts': DEFAULT_MAGNUS_USE_MCTS and _mcts_fn is not None,
+            'mcts_simulations': DEFAULT_MAGNUS_MCTS_SIMULATIONS,
+            'mcts_available': _mcts_fn is not None,
         },
     })
 
@@ -112,6 +144,35 @@ def _get_magnus_move(board, data):
         }, 400
     value_candidates = max(0, value_candidates)
 
+    # Per-request override of the MCTS toggle; defaults to the server's env flag.
+    use_mcts = bool(data.get('use_mcts', DEFAULT_MAGNUS_USE_MCTS))
+    if use_mcts and _mcts_fn is not None:
+        try:
+            simulations = int(data.get('mcts_simulations',
+                                       DEFAULT_MAGNUS_MCTS_SIMULATIONS))
+        except (TypeError, ValueError):
+            return {'error': "'mcts_simulations' must be an integer"}, 400
+        simulations = max(1, min(simulations, DEFAULT_MAGNUS_MCTS_MAX_SIMULATIONS))
+
+        move = _mcts_fn(
+            _magnus_model,
+            board,
+            num_simulations=simulations,
+            c_puct=DEFAULT_MAGNUS_MCTS_C_PUCT,
+            batch_size=DEFAULT_MAGNUS_MCTS_BATCH,
+            policy_temperature=DEFAULT_MAGNUS_MCTS_POLICY_TEMP,
+            move_temperature=temperature,
+        )
+        if move is None:
+            return {'error': 'Magnus MCTS returned no move'}, 500
+        return {
+            'move': move.uci(),
+            'player': 'magnus',
+            'method': 'mcts',
+            'mcts_simulations': simulations,
+            'temperature': temperature,
+        }, 200
+
     uci = _predict_fn(
         _magnus_model,
         board,
@@ -125,6 +186,7 @@ def _get_magnus_move(board, data):
     return {
         'move': uci,
         'player': 'magnus',
+        'method': 'policy',
         'temperature': temperature,
         'value_weight': value_weight,
         'value_candidates': value_candidates,

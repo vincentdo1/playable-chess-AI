@@ -1,318 +1,301 @@
 # Chess AI - Vincent Do
 
-A playable chess application featuring multiple AI players including a neural network trained on Magnus Carlsen's games. Available as a desktop app and a web interface.
+A playable chess application with multiple AI opponents, including a perspective ResNet + LSTM neural network (Magnus Carlsen NN) with optional MCTS search at inference. Runs as a browser app (Flask backend + static frontend) and as a Pygame desktop app.
+
+**Live site:** https://vincentdo1.github.io/playable-chess-AI
+**Backend (Railway):** drives the live site for Alphabeta and Magnus.
+
+> GitHub Pages serves the `main` branch. Changes on other branches won't appear on the live site until merged to `main`.
 
 ---
 
-## Project overview
+## Players
 
-This project combines several approaches to chess AI:
-
-- **Random** - picks a legal move at random
-- **Alphabeta** - minimax search with alpha-beta pruning, endgame-aware heuristics, and move ordering
-- **Stockfish** - UCI engine integration (desktop only)
-- **Magnus Carlsen NN** - a perspective ResNet + LSTM neural network trained on played human moves from GM/Magnus PGNs, with a legal move-policy head, a position value head, optional Stockfish/search quality metadata, and temperature sampling for move variety
+- **Random** — picks a legal move at random.
+- **Alphabeta** — minimax + alpha-beta pruning + endgame-aware heuristics.
+- **Stockfish** — UCI engine (desktop) or WebAssembly (browser).
+- **Magnus Carlsen NN** — perspective ResNet + LSTM with policy and value heads, trained on Magnus and GM games. Optionally wrapped in MCTS at inference for stronger, more tactical play.
 
 ---
 
-## Web interface
-
-The easiest way to play. No setup required.
-
-**Live site:** `https://vincentdo1.github.io/playable-chess-AI`
-
-Features available in the browser:
-- Human, Stockfish (WebAssembly), Random, Alphabeta AI, and Magnus Carlsen NN
-- Adjustable Stockfish skill level (0-20)
-- Adjustable alphabeta search depth
-- Move history, status display, flip board, undo move
-
-The web interface calls a Flask backend hosted on Railway for the Alphabeta and Magnus Carlsen players. Stockfish and Random run entirely in the browser with no server needed.
-
-The frontend is split into a small HTML shell plus ES modules under `frontend/src/`:
-
-- `api/` handles Flask calls.
-- `components/` owns DOM-facing UI controllers.
-- `game/` owns chess game orchestration.
-- `services/` wraps browser engines such as Stockfish.
-- `styles/` contains app CSS.
-
-For local frontend development, serve the repo root instead of opening the file directly:
+## Quick start (local play)
 
 ```powershell
-python -m http.server 8000
-```
-
-Then open `http://localhost:8000`.
-
----
-
-## Desktop app
-
-### Requirements
-
-- Python 3.12
-- An Nvidia GPU (recommended for Magnus Carlsen NN inference)
-- Stockfish 17 - download from `https://stockfishchess.org/download/`
-
-### Installation
-
-**Step 1 - Create a virtual environment with Python 3.12:**
-```
-py -3.12 -m venv chess_env
-chess_env\Scripts\activate
-```
-
-**Step 2 - Install PyTorch with CUDA support:**
-```
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-```
-
-**Step 3 - Install remaining dependencies:**
-```
+# 1. Python 3.12 venv + dependencies
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124   # /cpu if no GPU
 pip install -r requirements-local.txt
+
+# 2. Put a trained model in model/ (gitignored; you provide it)
+#    Default expected path: model/grandmaster_model_perspective_resnet_negatives_v2.pt
+#    Either train it (see "Training") or copy in an existing checkpoint.
+
+# 3. Verify the environment
+$env:REQUIRE_CUDA = "1"     # "0" for CPU
+python -m training.check_training_env
+
+# 4. Start the backend
+$env:MODEL_PATH = "model\grandmaster_model_perspective_resnet_negatives_v2.pt"
+$env:MAGNUS_USE_MCTS = "1"
+$env:MAGNUS_MCTS_SIMULATIONS = "200"
+python app.py
+
+# 5. In a second terminal, serve the frontend
+            
 ```
 
-**Step 4 - Add Stockfish**
-
-Place `stockfish.exe` in the project root, or set the environment variable to point to it anywhere on your machine:
-```
-set STOCKFISH_PATH=C:\path\to\stockfish.exe
-```
-
-**Step 5 - Add the trained model**
-
-Place `grandmaster_model_perspective_resnet_negatives_v2.pt` in the `model/` folder:
-```
-model/grandmaster_model_perspective_resnet_negatives_v2.pt
-```
-
-The model is not included in the repository due to its size. Contact the project owner or retrain using the instructions below.
-
-### Running the desktop app
-
-Activate the virtual environment first:
-```
-chess_env\Scripts\activate
-```
-
-**Play as human vs human (default):**
-```
-python main.py
-```
-
-**Play as human vs a specific AI:**
-```
-python main.py --black_player random
-python main.py --black_player alphabeta
-python main.py --black_player engine
-python main.py --black_player magnus_carlsen
-```
-
-The Magnus neural network uses policy+value move selection by default. Tune it
-with:
-```
-python main.py --black_player magnus_carlsen --magnus_temperature 0.8 --magnus_value_weight 2.0 --magnus_value_candidates 0
-```
-`--magnus_value_weight 0` disables value reranking. `--magnus_value_candidates 0`
-checks every legal move with the value head; a positive number checks only the
-top policy candidates.
-
-**Watch two AIs play each other:**
-```
-python main.py --white_player alphabeta --black_player random
-python main.py --white_player engine --black_player alphabeta
-python main.py --white_player magnus_carlsen --black_player engine
-python main.py --white_player random --black_player magnus_carlsen
-```
-
-**Available player options:**
-
-| Option | Description |
-|---|---|
-| `you` | Human player (default) |
-| `random` | Picks a random legal move |
-| `alphabeta` | Minimax with alpha-beta pruning and endgame heuristics |
-| `engine` | Stockfish UCI engine |
-| `magnus_carlsen` | Neural network trained on Magnus Carlsen's games |
+Open `http://localhost:8000`. If Magnus is greyed out, the backend failed to load the model — check the backend terminal for `Magnus model unavailable: ...` and the listed reason.
 
 ---
 
-## Training the neural network
+## Repository layout
 
-### Step 1 - Preprocess PGN data (run once)
-
-Parses PGN files and saves positions as binary chunks for fast training. The model is trained on the move actually played in the PGN. If Stockfish annotations such as `[%best_move: ...]` are present, preprocessing reports how often the played move matched the engine top move and stores that as metadata, but it does not use Stockfish's move as the training label.
-
-By default, preprocessing reads `extractions/GM_games_2600.zip` and `extractions/magnus.zip`. Set `GM_ZIP` or `MAGNUS_ZIP` only if you want to use files somewhere else.
-
-Preprocessing also stores `cp_loss`, `sample_weight`, `is_bad_move`, `cp_loss_bucket`, and `value_target` metadata for each position. `value_target` is a bounded side-to-move score, using Stockfish/eval annotations when available and the final game result as a fallback. `is_bad_move` is set from `BAD_MOVE_CP_LOSS_THRESHOLD`, and `cp_loss_bucket` marks unknown/ok/inaccuracy/mistake/blunder/critical categories. Set `STOCKFISH_PATH` if `stockfish.exe` is not in the project root. You can tune analysis with `CP_LOSS_TIME_LIMIT` or `CP_LOSS_DEPTH`, or set `CALCULATE_CP_LOSS=0` to skip the Stockfish metadata pass.
-
-The board tensor has 17 perspective-relative channels: 6 own-piece planes, 6 opponent-piece planes, 4 perspective-relative castling-right planes, and 1 en-passant target plane. Chunks include a `board_encoding` marker so old absolute white/black chunks fail loudly instead of training silently wrong. The model predicts one fixed move-policy class for each `(from, to, promotion)` combination, then masks illegal moves during training and inference. Re-run preprocessing after architecture changes so saved chunks match the current model input shape and policy metadata.
-
-Preprocessing writes separate train, validation, and test chunks. Defaults are `TRAIN_SPLIT=0.80`, `VAL_SPLIT=0.10`, and `TEST_SPLIT=0.10`. Use fresh output directories for each preprocessing run, for example:
 ```
-$env:TRAIN_DIR = "data/train_chunks_perspective_v2"
-$env:VAL_DIR = "data/val_chunks_perspective_v2"
-$env:TEST_DIR = "data/test_chunks_perspective_v2"
-python preprocess.py
+playable-chess-AI/
+  app.py                   Flask backend entry (used by Procfile)
+  main.py                  Pygame desktop entry
+  neural_network.py        Model architecture + supervised trainer
+  load_model.py            Checkpoint loading + raw-policy inference
+  chess_player.py          Non-NN players (alphabeta, random, Stockfish)
+  heuristics.py            Piece-square tables for chess_player
+  index.html               Frontend shell for GitHub Pages
+  stockfish.js             Stockfish WASM for browser play
+  Procfile                 Railway entry: `python -m backend.app`
+
+  backend/                 Flask API
+    app.py                 Routes, model loading, MCTS toggle
+  frontend/src/            Browser ES modules
+  pieces/                  Chess piece PNGs (used by frontend + Pygame)
+  tests/                   pytest unit tests
+
+  inference/               NN-augmented inference
+    mcts_player.py         PUCT/MCTS
+    search_player.py       Alpha-beta with NN evaluator
+  training/                Training pipeline
+    preprocess.py          PGN -> .npz chunks
+    resume_training.py     Safe resumed supervised training
+    check_training_env.py  CUDA/torch preflight
+    extract_lichess_gm_vs_lower.py
+  experiments/             Not production
+    self_play.py           AlphaZero-style data generation
+    train_self_play.py     AlphaZero-style iteration loop
+  evaluation/              Match-based and test-set evaluation
+    eval_arena.py          Paired-opening Elo with 95% CI
+    evaluate_model.py      Held-out test-set metrics
+    cross_model_match.py   Cross-branch model matches (subprocess)
+    move_server.py         JSON line move server (companion)
+    play_match.py          Headless engine matches, PGN output
+  scripts/
+    train_pipeline.sh      preprocess -> train -> self-play
+    compare_checkpoints.ps1   Full Elo comparison matrix
+
+  model/                   PyTorch checkpoints   (gitignored)
+  data/                    Training chunks       (gitignored)
+  extractions/             Raw PGN archives      (gitignored)
+  analysis_games/          play_match PGN output (gitignored)
+  eval_logs/               compare_checkpoints   (gitignored)
 ```
 
-The split is by game, not by individual position. When both the GM archive and Magnus archive are used, preprocessing skips Magnus games whose headers already appear in the GM archive so duplicate games do not leak across train/validation/test.
+Subpackages use absolute import paths (`from inference.mcts_player import ...`). Run scripts inside subpackages with `python -m`, e.g. `python -m evaluation.eval_arena --model_a ...`.
 
-To add Lichess strong-player-vs-lower-rated games, first extract a smaller tagged PGN:
-```
-python extract_lichess_gm_vs_lower.py `
-  --input "C:\Users\Vincent\Downloads\lichess_db_standard_rated_2026-04.pgn.zst" `
-  --output "extractions\lichess_2500_vs_u2200_2026-04.pgn" `
-  --gm_min_elo 2500 `
-  --opponent_max_elo 2200 `
-  --max_games 100000
+---
+
+## Training
+
+Three stages, optionally chained by `scripts/train_pipeline.sh`.
+
+### 1. Preprocess
+
+```powershell
+python -m training.preprocess              # uses Stockfish if available
+python -m training.preprocess --no_cp_loss # game-result value targets only
 ```
 
-Then preprocess that tagged PGN. Positive targets come only from `TrainingPolicyColor` / `StrongSide`; lower-rated moves with high CP loss are saved as negative targets so training can learn to avoid them:
-```
-$env:CP_LOSS_DEPTH = "6"
-$env:BAD_MOVE_CP_LOSS_THRESHOLD = "150"
-$env:INACCURACY_CP_LOSS_THRESHOLD = "50"
-$env:MISTAKE_CP_LOSS_THRESHOLD = "150"
-$env:BLUNDER_CP_LOSS_THRESHOLD = "300"
-$env:CRITICAL_CP_LOSS_THRESHOLD = "900"
-python preprocess.py `
-  --single_pgn "extractions\lichess_2500_vs_u2200_2026-04.pgn" `
-  --output_dir "data\train_chunks_lichess_2500_vs_u2200_v1" `
+Reads `extractions/GM_games_2600.zip` and `extractions/magnus.zip`, writes `data/{train,val,test}_chunks/`. The board tensor has 17 perspective-relative channels.
+
+Adding Lichess strong-vs-weak as negatives:
+
+```powershell
+python -m training.extract_lichess_gm_vs_lower `
+  --input "lichess_db_standard_rated_2026-04.pgn.zst" `
+  --output "extractions\lichess_2500_vs_u2200.pgn" `
+  --gm_min_elo 2500 --opponent_max_elo 2200 --max_games 100000
+
+python -m training.preprocess `
+  --single_pgn "extractions\lichess_2500_vs_u2200.pgn" `
+  --output_dir "data\train_chunks_lichess" `
   --policy_color_mode tagged
 ```
 
-To add shallow alpha-beta labels for bad candidate moves, enable
-search-assisted negatives during preprocessing. This keeps the played strong
-move as the positive label, then searches a few other legal moves and stores
-only the clearly worse alternatives as negative targets:
-```
-python preprocess.py `
-  --single_pgn "extractions\lichess_2500_vs_u2200_2026-04.pgn" `
-  --output_dir "data\train_chunks_lichess_search_negatives_perspective_v2" `
-  --policy_color_mode tagged `
-  --search_negative_candidates 8 `
-  --search_negative_max_per_position 2 `
-  --search_negative_depth 2 `
-  --search_negative_threshold 250 `
-  --search_negative_only `
-  --no_cp_loss
-```
+### 2. Supervised training
 
-Update the paths in `preprocess.py` to match your machine, then run:
-```
-python preprocess.py
-```
-
-This takes 20-30 minutes and saves chunks to `data/train_chunks/`, `data/val_chunks/`, and `data/test_chunks/` by default.
-
-### Step 2 - Train the model
-
-First verify that the Python environment you are about to use can see CUDA:
-```
-$env:REQUIRE_CUDA = "1"
-python check_training_env.py
-```
-
-```
-$env:TRAIN_DIR = "data/train_chunks_perspective_v2"
-$env:VAL_DIR = "data/val_chunks_perspective_v2"
-$env:MODEL_PATH = "model/grandmaster_model_perspective_resnet_v2.pt"
+```powershell
+$env:TRAIN_DIR    = "data/train_chunks"
+$env:VAL_DIR      = "data/val_chunks"
+$env:MODEL_PATH   = "model/grandmaster_model_perspective_resnet_negatives_v2.pt"
 $env:REQUIRE_CUDA = "1"
 python neural_network.py
 ```
 
-Training runs for up to 50 epochs with early stopping. On an RTX 3070, each epoch takes longer than the old two-layer CNN because the model now uses a padded residual tower. `REQUIRE_CUDA=1` makes training fail immediately instead of silently falling back to CPU. Set `TRAIN_LOG_INTERVAL` to control batch progress logging. Set `MODEL_PATH` to the checkpoint name you want; without it, training defaults to `model/grandmaster_model_perspective_resnet_negatives_v2.pt`. Avoid warm-starting from old absolute-channel checkpoints unless you are only doing a quick experiment; the board encoding and trunk architecture changed.
+Up to 50 epochs, early stopping, AMP + cuDNN benchmark enabled. Set `INIT_MODEL_PATH` to warm-start from a previous checkpoint (current architecture only).
 
-To train on the original GM/Magnus chunks plus the Lichess negative-example chunks, use `TRAIN_DIRS` separated by semicolons on Windows:
-```
-$env:TRAIN_DIRS = "data/train_chunks_perspective_v2;data/train_chunks_lichess_2500_vs_u2200_perspective_v2;data/train_chunks_lichess_search_negatives_perspective_v2"
-$env:VAL_DIR = "data/val_chunks_perspective_v2"
-$env:MODEL_PATH = "model/grandmaster_model_perspective_resnet_negatives_v2.pt"
-python neural_network.py
-```
+### 3. Resume / fine-tune
 
-### Step 3 - Test the model
+If Stage 2 stops early before convergence:
 
-```
-python load_model.py
+```powershell
+python -m training.resume_training `
+  --init   model\grandmaster_model_perspective_resnet_negatives_v2.pt `
+  --output model\grandmaster_resnet_v2_resumed.pt `
+  --epochs 40 --lr 3e-4 --early_stop_patience 10 --lr_patience 4
 ```
 
-Loads the trained model and predicts the first move from the starting position.
+Only writes the output if val_loss strictly beats the source, so it cannot regress your current model.
 
-For held-out test-set metrics and example predictions:
+### Pipeline shortcut
+
+```powershell
+bash scripts/train_pipeline.sh
 ```
-$env:TEST_DIR = "data/test_chunks_perspective_v2"
-$env:MODEL_PATH = "model/grandmaster_model_perspective_resnet_negatives_v2.pt"
-python evaluate_model.py --model $env:MODEL_PATH --examples 10
+
+---
+
+## Evaluation
+
+Three tools.
+
+**`eval_arena.py`** — head-to-head Elo with 95% CI, paired opening suite:
+
+```powershell
+python -m evaluation.eval_arena `
+  --model_a model\grandmaster_resnet_v2_resumed.pt `
+  --model_b model\grandmaster_model_perspective_resnet_negatives_v2.pt `
+  --method_a mcts --method_b mcts `
+  --paired --games 128 --sims 200 --mcts_batch_size 16
 ```
+
+Methods per side: `mcts`, `policy`, or `search`.
+
+**`cross_model_match.py`** — subprocess-isolated matches for incompatible architectures (e.g. an old-branch checkpoint vs the current one). Needs `move_server.py` present in each worktree:
+
+```powershell
+git worktree add ..\playable-chess-AI-other other-branch
+Copy-Item evaluation\move_server.py ..\playable-chess-AI-other\
+
+python -m evaluation.cross_model_match `
+  --player_a_dir ..\playable-chess-AI-other --player_a_model model\old.pt `
+  --player_b_dir .                         --player_b_model model\new.pt `
+  --games 20 --player_a_temperature 0.5 --player_b_temperature 0.5
+```
+
+**`compare_checkpoints.ps1`** — runs the full 4-way matrix (resumed vs base & vs self-play, in both mcts and policy):
+
+```powershell
+.\scripts\compare_checkpoints.ps1 `
+  -Resumed  model\grandmaster_resnet_v2_resumed.pt `
+  -Base     model\grandmaster_model_perspective_resnet_negatives_v2.pt `
+  -SelfPlay model\selfplay_checkpoints\selfplay_iter0020.pt `
+  -Sims 200 -Games 128
+```
+
+For held-out test-set metrics:
+
+```powershell
+python -m evaluation.evaluate_model --model $env:MODEL_PATH --examples 10
+```
+
+---
+
+## Self-play (experimental)
+
+AlphaZero-style: the network plays itself with MCTS, training targets are MCTS visit distributions and game outcomes.
+
+```powershell
+python -m experiments.train_self_play `
+  --init_checkpoint model\grandmaster_model_perspective_resnet_negatives_v2.pt `
+  --iterations 20 --games_per_iteration 50 --training_steps 1000 `
+  --mcts_simulations 400 --mcts_batch_size 16
+```
+
+In our runs this caused catastrophic forgetting (iter20 much weaker than the supervised base). Kept for future experiments with lower LR, fewer training steps per iteration, and supervised data mixed into the replay buffer. Don't deploy a self-play checkpoint without beating the base in `eval_arena`.
 
 ---
 
 ## Backend API
 
-The web interface uses a Flask backend to run Alphabeta and Magnus Carlsen moves server-side. The implementation lives in `backend/app.py`; root `app.py` is a compatibility wrapper.
+`backend/app.py` is the Flask app served on port 5000. Root `app.py` is the Procfile-compatible entry.
 
-**Run locally:**
-```
-pip install flask flask-cors
-$env:MODEL_PATH = "model/grandmaster_model_perspective_resnet_negatives_v2.pt"
-$env:MAGNUS_TEMPERATURE = "0"
-$env:MAGNUS_VALUE_WEIGHT = "2.0"
-$env:MAGNUS_VALUE_CANDIDATES = "0"
+```powershell
+$env:MODEL_PATH         = "model/grandmaster_model_perspective_resnet_negatives_v2.pt"
+$env:MAGNUS_USE_MCTS    = "1"
+$env:MAGNUS_MCTS_SIMULATIONS = "200"
 python app.py
 ```
 
-The server starts at `http://localhost:5000`. The web interface automatically connects to it when opened on localhost.
+**Endpoints:**
 
-**API endpoints:**
+`GET /` — health. Returns `players.magnus: bool` and a `magnus` block with the loaded model name, defaults, and `mcts_available` / `use_mcts`.
 
-`GET /` - health check, returns available players and the loaded Magnus model
+`POST /api/move` — get the next move.
 
-`POST /api/move` - get the next move
 ```json
-{ "fen": "<FEN string>", "player": "alphabeta", "depth": 3 }
-{ "fen": "<FEN string>", "player": "magnus", "temperature": 0.0, "value_weight": 2.0, "value_candidates": 0 }
+{ "fen": "<FEN>", "player": "alphabeta", "depth": 3 }
+{ "fen": "<FEN>", "player": "magnus", "temperature": 0.0, "value_weight": 2.0, "value_candidates": 0 }
+{ "fen": "<FEN>", "player": "magnus", "use_mcts": true, "mcts_simulations": 200 }
 ```
+
+Per-request fields override the server's env defaults. The response includes `"method": "policy"` or `"method": "mcts"`.
+
+**Backend env vars:**
+
+| Var | Default | Purpose |
+|---|---|---|
+| `MODEL_PATH` | `model/grandmaster_model_perspective_resnet_negatives_v2.pt` | Path to checkpoint |
+| `MAGNUS_TEMPERATURE` | `0.0` | Policy sampling temperature |
+| `MAGNUS_VALUE_WEIGHT` | `2.0` | Value-head reranking weight (policy mode) |
+| `MAGNUS_VALUE_CANDIDATES` | `0` | Top-K policy candidates to value-check (0 = all) |
+| `MAGNUS_USE_MCTS` | `0` | Enable MCTS globally |
+| `MAGNUS_MCTS_SIMULATIONS` | `200` | Sims per move |
+| `MAGNUS_MCTS_BATCH` | `16` | Leaf-eval batch size |
+| `MAGNUS_MCTS_C_PUCT` | `1.5` | PUCT exploration constant |
+| `MAGNUS_MCTS_POLICY_TEMP` | `1.5` | Policy-prior softening |
 
 ---
 
-## Project structure
+## Desktop app (Pygame)
 
+Loads the model directly (no backend). Set `MODEL_PATH` first if Magnus is playing:
+
+```powershell
+$env:MODEL_PATH = "model\grandmaster_model_perspective_resnet_negatives_v2.pt"
+python main.py --black_player magnus_carlsen
 ```
-playable-chess-AI/
-backend/                 Flask API package
-frontend/src/api/        Browser API client
-frontend/src/components/ DOM-facing UI controllers
-frontend/src/game/       Chess game orchestration
-frontend/src/services/   Browser engine wrappers
-frontend/src/styles/     CSS
-index.html               Frontend app shell for GitHub Pages
-app.py                   Compatibility wrapper for backend.app
-main.py                  Desktop chess GUI (Pygame)
-chess_player.py          Player implementations
-neural_network.py        Model architecture and training pipeline
-load_model.py            Model loading and move prediction
-preprocess.py            PGN -> .npz chunk conversion
-heuristics.py            Piece-square tables and endgame evaluation
-stockfish.js             Stockfish WebAssembly for browser play
-pieces/                  Chess piece PNG images
-model/                   Saved PyTorch checkpoints, ignored by Git
-data/                    Generated training chunks, ignored by Git
-```
+
+`--white_player` / `--black_player` options: `you`, `random`, `alphabeta`, `engine` (Stockfish), `magnus_carlsen`.
 
 ---
 
-## Deployment
+## Production deployment
 
-The web backend is deployed to Railway. Pushing to the `main` branch triggers an automatic redeploy.
+The live frontend (GitHub Pages, served from `main`) calls a Flask backend on Railway. The frontend's production API URL is hard-coded in `frontend/src/config.js`.
 
-To deploy your own instance, connect your GitHub repo to Railway and set the start command to `python -m backend.app`. The backend URL lives in `frontend/src/config.js`:
+To redeploy after model or backend changes:
 
-```javascript
-apiUrl: isFile || isLocalHost
-  ? 'http://localhost:5000'
-  : 'https://your-railway-url.up.railway.app',
+1. **Push to `main`** — GitHub Pages picks up the frontend. Railway picks up the backend.
+2. **Make sure the model file exists on Railway.** Because `model/` is gitignored, `git push` does **not** ship the checkpoint. Options:
+   - **Railway Volume** (recommended): create a persistent volume mounted at `/app/model/`, upload your `.pt` file once via the Railway shell (`cat > model/grandmaster_model_perspective_resnet_negatives_v2.pt` with the file streamed in), and set `MODEL_PATH` to that path.
+   - **Build-time download**: have your start command pull the model from an external URL (S3, Hugging Face, etc.) before launching the Flask app.
+   - **Force-commit via git LFS**: track `.pt` files via Git LFS and remove `model/` from `.gitignore`. Simple but couples the model lifecycle to git history.
+3. **Set Railway env vars**: `MODEL_PATH`, optionally `MAGNUS_USE_MCTS=1` / `MAGNUS_MCTS_SIMULATIONS=200` for stronger play.
+4. **Verify deployment**: `curl https://<your-railway-url>/` and confirm `players.magnus: true` and `mcts_available: true` in the response. If `players.magnus: false`, the model didn't load — check Railway logs for the `Magnus model unavailable: <reason>` line.
+
+If you didn't redeploy after a model architecture change, the Railway server may still hold a stale checkpoint (or none) and the frontend will hide the Magnus option even though local works.
+
+---
+
+## Tests
+
+```powershell
+python -m pytest tests/ -q
 ```

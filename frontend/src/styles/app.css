@@ -369,6 +369,11 @@ input[type=range] {
   cursor: pointer;
 }
 
+input[type=checkbox] {
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+
 .slider-hints {
   display: flex;
   justify-content: space-between;

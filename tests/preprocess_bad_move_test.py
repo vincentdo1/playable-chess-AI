@@ -2,7 +2,7 @@ import unittest
 
 import chess
 import preprocess
-from preprocess import (
+from training.preprocess import (
     CP_LOSS_BUCKET_BLUNDER,
     CP_LOSS_BUCKET_CRITICAL,
     CP_LOSS_BUCKET_INACCURACY,
