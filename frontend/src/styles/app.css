@@ -171,6 +171,7 @@ header {
 .highlight-last  { background: var(--hl-move)  !important; }
 .highlight-legal { background: var(--hl-legal) !important; }
 .highlight-check { background: var(--hl-check) !important; }
+.square-55d63.highlight-selected { box-shadow: inset 0 0 0 3px var(--gold); }
 
 .square-55d63.highlight-legal::after {
   content: '';
@@ -268,6 +269,13 @@ header {
   color: var(--text-1);
   letter-spacing: 0.06em;
   margin-bottom: 1.5rem;
+}
+
+.go-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
 }
 
 /* Panel */
@@ -468,6 +476,15 @@ input[type=checkbox] {
 .mn { color: var(--text-2); font-size: 0.7rem; padding-top: 1px; }
 .mw { color: var(--text-0); }
 .mb { color: var(--text-1); }
+
+.mw[data-ply], .mb[data-ply] {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0 4px;
+  transition: background 0.15s, color 0.15s;
+}
+.mw[data-ply]:hover, .mb[data-ply]:hover { background: var(--hover); color: var(--text-0); }
+.mw.active, .mb.active { background: var(--gold-dim); color: var(--gold-lt); }
 
 .history-empty {
   font-size: 0.8rem;

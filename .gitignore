@@ -17,6 +17,7 @@ chess_env/
 *.ipynb_checkpoints
 .vscode/
 .idea/
+.claude/
 *.suo
 *.user
 .DS_Store

@@ -37,7 +37,10 @@
             <div class="go-card">
               <div class="go-result" id="go-result">Game over</div>
               <div class="go-detail" id="go-detail"></div>
-              <button class="btn-gold action-inline" id="btn-go-new">New game</button>
+              <div class="go-actions">
+                <button class="btn-gold action-inline" id="btn-go-new">New game</button>
+                <button class="ghost-btn" id="btn-go-review">Review board</button>
+              </div>
             </div>
           </div>
         </div>
@@ -45,6 +48,7 @@
         <div class="board-controls">
           <button class="ghost-btn" id="btn-flip">Flip board</button>
           <button class="ghost-btn" id="btn-undo">Undo move</button>
+          <button class="ghost-btn" id="btn-show-result" hidden>Show result</button>
         </div>
       </section>
 

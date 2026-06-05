@@ -72,6 +72,10 @@ export class StatusPanel {
         ? 'Stalemate'
         : '50-move rule or repetition';
     }
-    this.gameOverOverlay.classList.add('active');
+    this.setGameOverVisible(true);
+  }
+
+  setGameOverVisible(visible) {
+    this.gameOverOverlay.classList.toggle('active', visible);
   }
 }

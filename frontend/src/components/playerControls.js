@@ -11,12 +11,15 @@ export class PlayerControls {
     this.skillValue = document.getElementById('skill-val');
     this.magnusGroup = document.getElementById('magnus-grp');
     this.mctsToggle = document.getElementById('mcts-toggle');
+    this.showResultBtn = document.getElementById('btn-show-result');
   }
 
   bind() {
     document.getElementById('btn-start').addEventListener('click', this.callbacks.onStart);
     document.getElementById('btn-reset').addEventListener('click', this.callbacks.onReset);
     document.getElementById('btn-go-new').addEventListener('click', this.callbacks.onReset);
+    document.getElementById('btn-go-review').addEventListener('click', this.callbacks.onDismissGameOver);
+    document.getElementById('btn-show-result').addEventListener('click', this.callbacks.onShowResult);
     document.getElementById('btn-flip').addEventListener('click', this.callbacks.onFlip);
     document.getElementById('btn-undo').addEventListener('click', this.callbacks.onUndo);
 
@@ -33,6 +36,18 @@ export class PlayerControls {
 
     this.skillSlider.addEventListener('change', () => {
       this.callbacks.onStockfishSkillChange(this.getStockfishSkill());
+    });
+
+    document.addEventListener('keydown', (event) => {
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        this.callbacks.onStepBack();
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        this.callbacks.onStepForward();
+      }
     });
 
     this.syncEngineOptions();
@@ -60,6 +75,10 @@ export class PlayerControls {
 
   getMagnusUseMcts() {
     return !!(this.mctsToggle && this.mctsToggle.checked);
+  }
+
+  setResultButtonVisible(visible) {
+    if (this.showResultBtn) this.showResultBtn.hidden = !visible;
   }
 
   enableMagnus() {

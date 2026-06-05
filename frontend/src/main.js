@@ -6,12 +6,15 @@ import { StatusPanel } from './components/statusPanel.js';
 import { config } from './config.js';
 import { ChessGameController } from './game/chessGameController.js';
 import { StockfishClient } from './services/stockfishClient.js';
+import { SoundFx } from './services/soundFx.js';
 
 const api = new ChessApi(config.apiUrl);
 const statusPanel = new StatusPanel();
-const history = new MoveHistory();
+const sound = new SoundFx();
 
 let game;
+
+const history = new MoveHistory((ply) => game.goToPly(ply));
 
 const boardView = new BoardView({
   piecesPath: config.piecesPath,
@@ -20,6 +23,8 @@ const boardView = new BoardView({
     onDrop: (...args) => game.onDrop(...args),
     onSnapEnd: () => boardView.setPosition(game.chess.fen()),
     onHover: (...args) => game.onHover(...args),
+    onMouseout: () => game.onMouseout(),
+    onSquareClick: (square) => game.onSquareClick(square),
   },
 });
 
@@ -34,6 +39,10 @@ const controls = new PlayerControls({
   onFlip: () => boardView.flip(),
   onUndo: () => game.undo(),
   onStockfishSkillChange: (skill) => stockfish.setSkill(skill),
+  onDismissGameOver: () => game.dismissGameOver(),
+  onShowResult: () => game.showResult(),
+  onStepBack: () => game.stepBack(),
+  onStepForward: () => game.stepForward(),
 });
 
 game = new ChessGameController({
@@ -43,6 +52,7 @@ game = new ChessGameController({
   history,
   statusPanel,
   stockfish,
+  sound,
   config,
 });
 

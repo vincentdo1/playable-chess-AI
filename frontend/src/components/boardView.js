@@ -7,6 +7,7 @@ export class BoardView {
     this.board = null;
     this.lastFrom = null;
     this.lastTo = null;
+    this.selectedSquare = null;
     this.legalSquares = [];
   }
 
@@ -22,7 +23,17 @@ export class BoardView {
       onDrop: (...args) => this.callbacks.onDrop(...args),
       onSnapEnd: () => this.callbacks.onSnapEnd(),
       onMouseoverSquare: (...args) => this.callbacks.onHover(...args),
-      onMouseoutSquare: () => this.clearLegalMoves(),
+      onMouseoutSquare: () => this.callbacks.onMouseout(),
+    });
+
+    // Click-to-move: chessboard.js has no per-square click hook, so delegate
+    // from the board element and read the algebraic square it carries.
+    document.getElementById('board').addEventListener('click', (event) => {
+      const squareEl = event.target.closest('.square-55d63');
+      if (!squareEl) return;
+      const square = squareEl.getAttribute('data-square')
+        || (squareEl.className.match(/square-([a-h][1-8])/) || [])[1];
+      if (square) this.callbacks.onSquareClick(square);
     });
   }
 
@@ -73,6 +84,17 @@ export class BoardView {
     this.lastTo = null;
   }
 
+  markSelected(square) {
+    this.clearSelected();
+    this.selectedSquare = square;
+    squareElement(square)?.classList.add('highlight-selected');
+  }
+
+  clearSelected() {
+    squareElement(this.selectedSquare)?.classList.remove('highlight-selected');
+    this.selectedSquare = null;
+  }
+
   markCheck(chess) {
     this.clearCheck();
     if (!chess.in_check()) return;
@@ -97,5 +119,6 @@ export class BoardView {
     this.clearLastMove();
     this.clearLegalMoves();
     this.clearCheck();
+    this.clearSelected();
   }
 }

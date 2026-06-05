@@ -2,6 +2,12 @@
 
 import chess
 
+# The piece-square / positional tables below were tuned ~10x larger than the
+# pawn-unit material values (pawn=1, knight=3.2, ...). Left unscaled they
+# outweigh material, so the search trades pieces for placement. Scale every
+# positional term down to keep material the dominant factor.
+PST_SCALE = 0.1
+
 # Middlegame piece-square tables
 
 pawnEvalWhite = (
@@ -174,39 +180,39 @@ def evaluate(board_array, chess_board: chess.Board = None) -> float:
 
     for x, y, piece in board_array[0]:
         if piece == "p":
-            score += 1 + pawnEvalWhite[y - 1][x - 1]
+            score += 1 + PST_SCALE * pawnEvalWhite[y - 1][x - 1]
         elif piece == "b":
-            score += 3.3 + bishopEvalWhite[y - 1][x - 1]     
+            score += 3.3 + PST_SCALE * bishopEvalWhite[y - 1][x - 1]     
         elif piece == "n":
-            score += 3.2 + knightEval[y - 1][x - 1]           
+            score += 3.2 + PST_SCALE * knightEval[y - 1][x - 1]           
         elif piece == "r":
-            score += 5.0 + rookEvalWhite[y - 1][x - 1]         
+            score += 5.0 + PST_SCALE * rookEvalWhite[y - 1][x - 1]         
         elif piece == "q":
-            score += 9.0 + queenEval[y - 1][x - 1] 
+            score += 9.0 + PST_SCALE * queenEval[y - 1][x - 1] 
         elif piece == "k":
             score += 200
             if endgame:
-                score += kingEndgameEval[y - 1][x - 1]
+                score += PST_SCALE * kingEndgameEval[y - 1][x - 1]
             else:
-                score += kingEvalWhite[y - 1][x - 1]
+                score += PST_SCALE * kingEvalWhite[y - 1][x - 1]
 
     for x, y, piece in board_array[1]:
         if piece == "p":
-            score -= 1 + pawnEvalBlack[y - 1][x - 1]
+            score -= 1 + PST_SCALE * pawnEvalBlack[y - 1][x - 1]
         elif piece == "b":
-            score -= 3.3 + bishopEvalBlack[y - 1][x - 1]
+            score -= 3.3 + PST_SCALE * bishopEvalBlack[y - 1][x - 1]
         elif piece == "n":
-            score -= 3.2 + knightEval[y - 1][x - 1]
+            score -= 3.2 + PST_SCALE * knightEval[y - 1][x - 1]
         elif piece == "r":
-            score -= 5.0 + rookEvalBlack[y - 1][x - 1]
+            score -= 5.0 + PST_SCALE * rookEvalBlack[y - 1][x - 1]
         elif piece == "q":
-            score -= 9.0 + queenEval[y - 1][x - 1]
+            score -= 9.0 + PST_SCALE * queenEval[y - 1][x - 1]
         elif piece == "k":
             score -= 200
             if endgame:
-                score -= kingEndgameEval[y - 1][x - 1]
+                score -= PST_SCALE * kingEndgameEval[y - 1][x - 1]
             else:
-                score -= kingEvalBlack[y - 1][x - 1]
+                score -= PST_SCALE * kingEvalBlack[y - 1][x - 1]
 
     if endgame and chess_board is not None:
 
@@ -216,20 +222,20 @@ def evaluate(board_array, chess_board: chess.Board = None) -> float:
         for sq in chess_board.pieces(chess.PAWN, chess.WHITE):
             if _is_passed_pawn(chess_board, sq, chess.WHITE):
                 rank  = chess.square_rank(sq)
-                score += _passed_pawn_bonus(rank, chess.WHITE)
+                score += PST_SCALE * _passed_pawn_bonus(rank, chess.WHITE)
                 if white_king_sq is not None:
-                    score += 0.3 * _king_pawn_proximity(white_king_sq, sq)
+                    score += PST_SCALE * 0.3 * _king_pawn_proximity(white_king_sq, sq)
                 if black_king_sq is not None:
-                    score -= 0.2 * _king_pawn_proximity(black_king_sq, sq)
+                    score -= PST_SCALE * 0.2 * _king_pawn_proximity(black_king_sq, sq)
 
         for sq in chess_board.pieces(chess.PAWN, chess.BLACK):
             if _is_passed_pawn(chess_board, sq, chess.BLACK):
                 rank  = chess.square_rank(sq)
-                score -= _passed_pawn_bonus(rank, chess.BLACK)
+                score -= PST_SCALE * _passed_pawn_bonus(rank, chess.BLACK)
                 if black_king_sq is not None:
-                    score -= 0.3 * _king_pawn_proximity(black_king_sq, sq)
+                    score -= PST_SCALE * 0.3 * _king_pawn_proximity(black_king_sq, sq)
                 if white_king_sq is not None:
-                    score += 0.2 * _king_pawn_proximity(white_king_sq, sq)
+                    score += PST_SCALE * 0.2 * _king_pawn_proximity(white_king_sq, sq)
 
         only_kings_and_pawns = all(
             p.piece_type in (chess.KING, chess.PAWN)
@@ -238,6 +244,6 @@ def evaluate(board_array, chess_board: chess.Board = None) -> float:
         if only_kings_and_pawns:
             white_pawns = len(chess_board.pieces(chess.PAWN, chess.WHITE))
             black_pawns = len(chess_board.pieces(chess.PAWN, chess.BLACK))
-            score += 1.5 * (white_pawns - black_pawns)
+            score += PST_SCALE * 1.5 * (white_pawns - black_pawns)
 
     return score
