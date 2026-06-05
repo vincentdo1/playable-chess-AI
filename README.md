@@ -7,6 +7,12 @@ A playable chess application with multiple AI opponents, including a perspective
 
 > GitHub Pages serves the `main` branch. Changes on other branches won't appear on the live site until merged to `main`.
 
+<p align="center">
+  <img src="media/network.gif" alt="CNN+LSTM forward pass" width="720">
+  <br/>
+  <em>Forward pass of the trained CNN + LSTM on a real position. <a href="media/network.mp4">MP4</a></em>
+</p>
+
 ---
 
 ## Players
