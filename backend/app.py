@@ -40,6 +40,9 @@ DEFAULT_MAGNUS_MCTS_MAX_SIMULATIONS = int(os.environ.get('MAGNUS_MCTS_MAX_SIMULA
 DEFAULT_MAGNUS_MCTS_BATCH = int(os.environ.get('MAGNUS_MCTS_BATCH', '16'))
 DEFAULT_MAGNUS_MCTS_C_PUCT = float(os.environ.get('MAGNUS_MCTS_C_PUCT', '1.5'))
 DEFAULT_MAGNUS_MCTS_POLICY_TEMP = float(os.environ.get('MAGNUS_MCTS_POLICY_TEMP', '1.5'))
+# Wall-clock cap per move (seconds); MCTS stops at whichever of sims/time comes
+# first. 0 = no cap. Set on CPU deploys (Railway) so a move can't run long.
+DEFAULT_MAGNUS_MCTS_TIME_LIMIT = float(os.environ.get('MAGNUS_MCTS_TIME_LIMIT', '0'))
 
 try:
     from load_model import MODEL_PATH, load_trained_model, predict_next_move
@@ -79,6 +82,7 @@ def health():
             'blunder_guard': DEFAULT_MAGNUS_BLUNDER_GUARD,
             'use_mcts': DEFAULT_MAGNUS_USE_MCTS and _mcts_fn is not None,
             'mcts_simulations': DEFAULT_MAGNUS_MCTS_SIMULATIONS,
+            'mcts_time_limit': DEFAULT_MAGNUS_MCTS_TIME_LIMIT or None,
             'mcts_available': _mcts_fn is not None,
         },
     })
@@ -158,6 +162,8 @@ def _get_magnus_move(board, data):
         except (TypeError, ValueError):
             return {'error': "'mcts_simulations' must be an integer"}, 400
         simulations = max(1, min(simulations, DEFAULT_MAGNUS_MCTS_MAX_SIMULATIONS))
+        time_limit = (DEFAULT_MAGNUS_MCTS_TIME_LIMIT
+                      if DEFAULT_MAGNUS_MCTS_TIME_LIMIT > 0 else None)
 
         move = _mcts_fn(
             _magnus_model,
@@ -167,6 +173,7 @@ def _get_magnus_move(board, data):
             batch_size=DEFAULT_MAGNUS_MCTS_BATCH,
             policy_temperature=DEFAULT_MAGNUS_MCTS_POLICY_TEMP,
             move_temperature=temperature,
+            time_limit=time_limit,
         )
         if move is None:
             return {'error': 'Magnus MCTS returned no move'}, 500
@@ -175,6 +182,7 @@ def _get_magnus_move(board, data):
             'player': 'magnus',
             'method': 'mcts',
             'mcts_simulations': simulations,
+            'mcts_time_limit': time_limit,
             'temperature': temperature,
         }, 200
 

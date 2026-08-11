@@ -15,13 +15,47 @@ from neural_network import (
 DEFAULT_VALUE_WEIGHT = float(os.environ.get('MAGNUS_VALUE_WEIGHT', '2.0'))
 DEFAULT_VALUE_CANDIDATES = int(os.environ.get('MAGNUS_VALUE_CANDIDATES', '0'))
 
+def _maybe_fetch_from_hf(path: str) -> str:
+    """Return a local path to the checkpoint, downloading it from a Hugging
+    Face model repo if `path` is missing and MAGNUS_HF_REPO is set.
+
+    This is how the Railway/container deploy gets the git-ignored .pt: the
+    weights live in an HF model repo and are pulled on first boot into the HF
+    cache. Local dev is unaffected -- if the file already exists we never touch
+    the network or import huggingface_hub.
+
+    Env:
+      MAGNUS_HF_REPO      repo id, e.g. "vincentdo/magnus-chess-v4" (required)
+      MAGNUS_HF_FILENAME  file in the repo (default: basename of `path`)
+      MAGNUS_HF_REVISION  branch/tag/commit (default: latest on main)
+      HF_TOKEN            only for a private repo
+    """
+    if os.path.exists(path):
+        return path
+    repo_id = os.environ.get('MAGNUS_HF_REPO')
+    if not repo_id:
+        return path  # let the caller raise the normal FileNotFoundError
+    filename = os.environ.get('MAGNUS_HF_FILENAME', os.path.basename(path))
+    revision = os.environ.get('MAGNUS_HF_REVISION') or None
+    token = os.environ.get('HF_TOKEN') or None
+    from huggingface_hub import hf_hub_download  # lazy: only needed to download
+    print(f"Model {path!r} not found locally; fetching {filename!r} from "
+          f"Hugging Face repo {repo_id!r}...")
+    local_path = hf_hub_download(
+        repo_id=repo_id, filename=filename, revision=revision, token=token
+    )
+    print(f"Downloaded checkpoint to {local_path}")
+    return local_path
+
+
 def load_trained_model(path: str = MODEL_PATH) -> ChessModel:
     """Load a saved ChessModel from a .pt checkpoint file."""
+    path = _maybe_fetch_from_hf(path)
     if not os.path.exists(path):
         raise FileNotFoundError(
             f"Model checkpoint {path!r} was not found. Train the current "
             "perspective/residual model or set MODEL_PATH to a matching "
-            "checkpoint."
+            "checkpoint, or set MAGNUS_HF_REPO to fetch it from Hugging Face."
         )
 
     checkpoint = torch.load(path, map_location=DEVICE)
