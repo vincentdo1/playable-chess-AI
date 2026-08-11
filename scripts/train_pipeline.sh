@@ -6,11 +6,9 @@
 # Stage 2  supervised-train the CURRENT architecture on those chunks -> $MODEL_PATH
 # Stage 3  self-play from $MODEL_PATH, improving policy+value via MCTS
 #
-# Why this exists: the repo ships a trained checkpoint (grandmaster_model_policy_v1.pt)
-# that is policy-only and built for an older, smaller architecture. It does NOT fit
-# the current ChessModel (128 filters / 8 blocks / no pooling) and has no value head,
-# which MCTS needs. This script rebuilds a matching base model with both heads from
-# the GM data, then self-plays from it.
+# Defaults target the v3 architecture/encoding (data/*_chunks_v3,
+# model/grandmaster_resnet_v3.pt). Set ARCH_VERSION=v2 plus matching
+# TRAIN_DIR/VAL_DIR/MODEL_PATH to rebuild the legacy model instead.
 #
 # Run on a GPU box. Each stage is resumable: comment out earlier stages once done.
 #
@@ -23,11 +21,11 @@
 set -euo pipefail
 
 # --- Shared config -----------------------------------------------------------
-export TRAIN_DIR="${TRAIN_DIR:-data/train_chunks}"
-export VAL_DIR="${VAL_DIR:-data/val_chunks}"
-export TEST_DIR="${TEST_DIR:-data/test_chunks}"
+export TRAIN_DIR="${TRAIN_DIR:-data/train_chunks_v3}"
+export VAL_DIR="${VAL_DIR:-data/val_chunks_v3}"
+export TEST_DIR="${TEST_DIR:-data/test_chunks_v3}"
 # The current-architecture base model that self-play will bootstrap from.
-export MODEL_PATH="${MODEL_PATH:-model/grandmaster_model_perspective_resnet_negatives_v2.pt}"
+export MODEL_PATH="${MODEL_PATH:-model/grandmaster_resnet_v3.pt}"
 
 # Supervised training hyperparameters (env-read by neural_network.py).
 export EPOCHS="${EPOCHS:-50}"
@@ -56,7 +54,7 @@ if [ -z "${PYTHON:-}" ]; then
 fi
 
 if [ "${SKIP_ENV_CHECK:-0}" != "1" ]; then
-  $PYTHON check_training_env.py
+  $PYTHON -m training.check_training_env
 fi
 
 # --- Stage 1: preprocess -----------------------------------------------------
@@ -70,7 +68,7 @@ if [ "${SKIP_PREPROCESS:-0}" != "1" ]; then
     echo "  (no Stockfish found -> --no_cp_loss, value targets from game result)"
     PREPROCESS_FLAGS="$PREPROCESS_FLAGS --no_cp_loss"
   fi
-  $PYTHON preprocess.py $PREPROCESS_FLAGS
+  $PYTHON -m training.preprocess $PREPROCESS_FLAGS
 else
   echo "=== Stage 1/3: SKIPPED (SKIP_PREPROCESS=1) ==="
 fi
@@ -84,12 +82,14 @@ else
 fi
 
 # --- Stage 3: self-play ------------------------------------------------------
+# Defaults follow train_self_play's retry recipe (LR 1e-4, 100 steps/iter,
+# 200 games/iter, supervised anchor mixed in, per-iteration gate).
 echo "=== Stage 3/3: AlphaZero self-play from $MODEL_PATH ==="
-$PYTHON train_self_play.py \
+$PYTHON -m experiments.train_self_play \
   --init_checkpoint "$MODEL_PATH" \
   --iterations "${SP_ITERATIONS:-20}" \
-  --games_per_iteration "${SP_GAMES:-50}" \
-  --training_steps "${SP_TRAIN_STEPS:-1000}" \
+  --games_per_iteration "${SP_GAMES:-200}" \
+  --training_steps "${SP_TRAIN_STEPS:-100}" \
   --mcts_simulations "${SP_SIMS:-400}" \
   --mcts_batch_size "${SP_BATCH:-16}" \
   --batch_size "${SP_TRAIN_BATCH:-256}"

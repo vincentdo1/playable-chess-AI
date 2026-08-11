@@ -30,8 +30,16 @@ import chess.polyglot
 import numpy as np
 import torch
 
-from neural_network import ChessModel, MOVE_VOCAB_SIZE, move_to_policy_index
-from load_model import _position_arrays
+from neural_network import (
+    BOARD_ENCODING_VERSION, ChessModel, get_encoding_spec
+)
+from load_model import _model_encoding, _move_batch_tensor, _position_arrays
+
+
+def _model_spec(model):
+    return getattr(
+        model, 'encoding_spec', get_encoding_spec(BOARD_ENCODING_VERSION)
+    )
 
 
 @dataclass
@@ -82,7 +90,8 @@ class MCTSNode:
 
 
 def _expand_node(node: MCTSNode, board: chess.Board,
-                 policy_logits: np.ndarray, policy_temperature: float) -> None:
+                 policy_logits: np.ndarray, policy_temperature: float,
+                 move_to_index=None) -> None:
     """Create children for each legal move, with softened policy as priors."""
     if node.is_expanded:
         return
@@ -91,9 +100,11 @@ def _expand_node(node: MCTSNode, board: chess.Board,
         node.is_expanded = True
         return
 
+    if move_to_index is None:
+        move_to_index = get_encoding_spec(BOARD_ENCODING_VERSION)['move_to_index']
     is_black = (board.turn == chess.BLACK)
     legal_indices = np.array(
-        [move_to_policy_index(m, flip=is_black) for m in legal_moves],
+        [move_to_index(m, flip=is_black) for m in legal_moves],
         dtype=np.int64,
     )
     legal_logits = policy_logits[legal_indices] / max(policy_temperature, 1e-6)
@@ -156,15 +167,18 @@ def _backup(path: list[MCTSNode], value: float) -> None:
 def _batched_eval(model: ChessModel, boards: list[chess.Board]):
     """Run one batched forward pass. Returns (policy_logits[B, V], values[B])."""
     if not boards:
-        empty_p = np.zeros((0, MOVE_VOCAB_SIZE), dtype=np.float32)
+        empty_p = np.zeros(
+            (0, _model_spec(model)['move_vocab_size']), dtype=np.float32
+        )
         empty_v = np.zeros(0, dtype=np.float32)
         return empty_p, empty_v
 
     device = next(model.parameters()).device
+    encoding_version = _model_encoding(model)
     board_arrays = []
     move_arrays = []
     for board in boards:
-        b, m = _position_arrays(board)
+        b, m = _position_arrays(board, encoding_version)
         board_arrays.append(b)
         move_arrays.append(m)
 
@@ -175,11 +189,7 @@ def _batched_eval(model: ChessModel, boards: list[chess.Board]):
         .contiguous()
         .to(device, non_blocking=device.type == 'cuda')
     )
-    move_batch = (
-        torch.from_numpy(np.stack(move_arrays))
-        .float()
-        .to(device, non_blocking=device.type == 'cuda')
-    )
+    move_batch = _move_batch_tensor(move_arrays, len(boards), device)
 
     with torch.inference_mode(), torch.amp.autocast(
         device.type, enabled=device.type == 'cuda'
@@ -194,8 +204,9 @@ def _batched_eval(model: ChessModel, boards: list[chess.Board]):
 def _descend_to_leaf(root: MCTSNode, root_board: chess.Board, c_puct: float):
     """Walk down with PUCT, applying virtual loss. Returns (leaf, leaf_board, path, depth)."""
     node = root
-    # Keep last 10 moves for the LSTM input; we only ever need the recent tail.
-    board = root_board.copy(stack=10)
+    # Keep a recent-move tail: v2 needs the last 10 moves for its LSTM input,
+    # v3 scans the stack for its repetition planes during descent.
+    board = root_board.copy(stack=16)
     path = [node]
     node.virtual_loss += 1
     depth = 0
@@ -230,11 +241,14 @@ def mcts_search(
     start = time.monotonic()
     deadline = start + time_limit if time_limit else None
 
+    move_to_index = _model_spec(model)['move_to_index']
+
     # Pre-expand root.
     policies, values = _batched_eval(model, [root_board])
     stats.nn_batches += 1
     stats.nn_evals += 1
-    _expand_node(root, root_board, policies[0], policy_temperature)
+    _expand_node(root, root_board, policies[0], policy_temperature,
+                 move_to_index=move_to_index)
     root.visit_count = 1
     root.value_sum = float(values[0])
 
@@ -283,7 +297,8 @@ def mcts_search(
         stats.nn_evals += len(pending)
 
         for (leaf, leaf_board, path), policy, value in zip(pending, policies, values):
-            _expand_node(leaf, leaf_board, policy, policy_temperature)
+            _expand_node(leaf, leaf_board, policy, policy_temperature,
+                         move_to_index=move_to_index)
             _backup(path, float(value))
 
         sims_done += len(pending)

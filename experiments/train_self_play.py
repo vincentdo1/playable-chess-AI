@@ -25,16 +25,19 @@ log-probabilities, matching how the network is used at inference.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import time
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 
+import chess
 import numpy as np
 import torch
 
 from neural_network import (
+    ARCH_VERSION,
     BOARD_ENCODING_VERSION,
     ChessModel,
     DEVICE,
@@ -43,25 +46,45 @@ from neural_network import (
     RESIDUAL_BLOCKS,
     RESIDUAL_FILTERS,
     assert_training_device,
+    build_model,
+    get_encoding_spec,
     mask_illegal_logits,
     print_device_info,
 )
-from load_model import load_trained_model
+from load_model import load_trained_model, predict_next_move, _model_encoding
 from experiments.self_play import SelfPlayConfig, generate_self_play_games
 
 
 @dataclass
 class TrainingConfig:
-    """Hyperparameters for the self-play training loop."""
+    """Hyperparameters for the self-play training loop.
+
+    Defaults follow the "retry recipe" after the first attempt collapsed
+    (iter20 lost 20-0 to its supervised base from catastrophic forgetting):
+      - learning_rate 1e-3 -> 1e-4 (fine-tuning a strong model)
+      - training_steps 1000 -> 100 (was ~50 effective epochs on tiny data)
+      - games_per_iteration 50 -> 200 (more fresh positions per update)
+      - supervised chunks mixed into every batch (anchors GM knowledge)
+      - per-iteration gate vs the pre-iteration weights, revert + stop on loss
+    """
     num_iterations: int = 20
-    games_per_iteration: int = 50
+    games_per_iteration: int = 200
     replay_buffer_capacity: int = 200_000     # positions
-    training_steps_per_iteration: int = 1000
+    training_steps_per_iteration: int = 100
     batch_size: int = 256
-    learning_rate: float = 1e-3
+    learning_rate: float = 1e-4
     weight_decay: float = 1e-4
     value_loss_weight: float = 1.0
     grad_clip: float = 1.0
+    # Supervised anchor data mixed into each batch.
+    supervised_dirs: str = ''                 # os.pathsep-separated chunk dirs
+    supervised_fraction: float = 0.5          # fraction of each batch
+    supervised_capacity: int = 200_000        # positions kept in memory
+    # Gating match after each iteration (0 games disables).
+    gate_games: int = 24
+    gate_min_score: float = 0.45
+    gate_max_plies: int = 200
+    gate_temperature: float = 0.35
     # File system
     chunks_dir: str = 'data/selfplay_chunks'
     checkpoint_dir: str = 'model/selfplay_checkpoints'
@@ -78,20 +101,39 @@ class ReplayBuffer:
     Positions are stored as parallel arrays inside chunks; sampling picks a
     global flat index uniformly across all positions currently in the buffer
     and translates it to (chunk_idx, within_chunk_idx).
+
+    The buffer is encoding-aware: board shape, move vocabulary, and whether
+    move-history arrays exist all come from the model's encoding spec.
     """
 
-    def __init__(self, capacity: int):
+    def __init__(self, capacity: int,
+                 encoding_version: str = BOARD_ENCODING_VERSION):
         self.capacity = capacity
         self.chunks: list[dict] = []
+        self.encoding_version = encoding_version
+        from neural_network import get_encoding_spec
+        self.spec = get_encoding_spec(encoding_version)
 
     def total_positions(self) -> int:
         return sum(c['boards'].shape[0] for c in self.chunks)
 
+    def _check_chunk_encoding(self, data, path: str) -> None:
+        chunk_encoding = (
+            str(data['board_encoding'].item())
+            if 'board_encoding' in data else BOARD_ENCODING_VERSION
+        )
+        if chunk_encoding != self.encoding_version:
+            raise ValueError(
+                f"{path} uses encoding {chunk_encoding!r}, buffer expects "
+                f"{self.encoding_version!r}."
+            )
+
     def add_chunk_from_path(self, path: str) -> int:
         data = np.load(path)
+        self._check_chunk_encoding(data, path)
         chunk = {
             'boards': data['boards'],
-            'move_seqs': data['move_seqs'],
+            'move_seqs': data['move_seqs'] if 'move_seqs' in data else None,
             'legal_move_indices': data['legal_move_indices'],
             'legal_move_offsets': data['legal_move_offsets'],
             'visit_counts': data['visit_counts'],
@@ -104,6 +146,54 @@ class ReplayBuffer:
         self.chunks.append(chunk)
         self._evict_to_capacity()
         return n
+
+    def add_supervised_chunk_from_path(self, path: str,
+                                       max_positions: int | None = None) -> int:
+        """Ingest a supervised chunk as one-hot 'visit' targets.
+
+        Only positive policy targets are kept (negatives have no
+        distributional meaning here). The played move gets a single visit, so
+        sampling treats it exactly like an MCTS distribution concentrated on
+        one move. Mixing these into every batch anchors the network to GM
+        play and prevents the catastrophic forgetting seen in the first
+        self-play run.
+        """
+        data = np.load(path)
+        self._check_chunk_encoding(data, path)
+        target_type = data['policy_target_type']
+        keep = np.where(target_type > 0)[0]
+        if max_positions is not None and len(keep) > max_positions:
+            keep = np.random.choice(keep, size=max_positions, replace=False)
+            keep.sort()
+        if len(keep) == 0:
+            return 0
+
+        offsets = data['legal_move_offsets']
+        indices = data['legal_move_indices']
+        move_idx = data['move_idx']
+
+        new_offsets = np.zeros(len(keep) + 1, dtype=np.int64)
+        legal_parts = []
+        visit_parts = []
+        for row, i in enumerate(keep):
+            start, end = int(offsets[i]), int(offsets[i + 1])
+            legal = indices[start:end]
+            visits = (legal == move_idx[i]).astype(np.int32)
+            legal_parts.append(legal)
+            visit_parts.append(visits)
+            new_offsets[row + 1] = new_offsets[row] + len(legal)
+
+        chunk = {
+            'boards': data['boards'][keep],
+            'move_seqs': data['moves'][keep] if 'moves' in data else None,
+            'legal_move_indices': np.concatenate(legal_parts).astype(np.int32),
+            'legal_move_offsets': new_offsets,
+            'visit_counts': np.concatenate(visit_parts).astype(np.int32),
+            'value_target': data['value_target'][keep],
+            'path': path,
+        }
+        self.chunks.append(chunk)
+        return len(keep)
 
     def _evict_to_capacity(self) -> None:
         while self.total_positions() > self.capacity and len(self.chunks) > 1:
@@ -125,18 +215,25 @@ class ReplayBuffer:
         starts = np.concatenate([[0], cumsum[:-1]])
         within = flat - starts[chunk_idx]
 
-        boards = np.empty((batch_size, 8, 8, 17), dtype=np.float32)
-        move_seqs = np.empty((batch_size, 10, 132), dtype=np.float32)
+        channels = self.spec['board_channels']
+        vocab = self.spec['move_vocab_size']
+        uses_history = self.spec['uses_move_history']
+        boards = np.empty((batch_size, 8, 8, channels), dtype=np.float32)
+        move_seqs = (
+            np.empty((batch_size, 10, 132), dtype=np.float32)
+            if uses_history else np.zeros((batch_size, 0), dtype=np.float32)
+        )
         value_target = np.empty(batch_size, dtype=np.float32)
         # Legal moves vary in count per position; build a dense (B, V) policy
         # target and legal mask here so the training step is simple.
-        policy_target = np.zeros((batch_size, MOVE_VOCAB_SIZE), dtype=np.float32)
-        legal_mask = np.zeros((batch_size, MOVE_VOCAB_SIZE), dtype=bool)
+        policy_target = np.zeros((batch_size, vocab), dtype=np.float32)
+        legal_mask = np.zeros((batch_size, vocab), dtype=bool)
 
         for row, (ci, wi) in enumerate(zip(chunk_idx, within)):
             chunk = self.chunks[ci]
             boards[row] = chunk['boards'][wi]
-            move_seqs[row] = chunk['move_seqs'][wi]
+            if uses_history and chunk['move_seqs'] is not None:
+                move_seqs[row] = chunk['move_seqs'][wi]
             value_target[row] = chunk['value_target'][wi]
 
             offsets = chunk['legal_move_offsets']
@@ -155,6 +252,14 @@ class ReplayBuffer:
             'policy_target': policy_target,
             'value_target': value_target,
         }
+
+
+def merge_batches(a: dict | None, b: dict | None) -> dict | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return {k: np.concatenate([a[k], b[k]], axis=0) for k in a}
 
 
 def distribution_train_step(
@@ -240,6 +345,51 @@ def distribution_train_step(
     }
 
 
+def _snapshot_state(model) -> dict:
+    """CPU copy of the weights, for gating reverts."""
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
+def _gate_match(model, previous_state: dict, config: 'TrainingConfig') -> float:
+    """Fast policy-mode match: new weights vs pre-iteration weights.
+
+    Returns the new model's score in [0, 1] (win=1, draw=0.5). Sampling
+    temperature for the first 20 plies de-duplicates the games; after that
+    both sides play greedily.
+    """
+    prev = type(model)().to(DEVICE)
+    prev.load_state_dict(previous_state)
+    prev.eval()
+    prev.encoding_version = _model_encoding(model)
+    prev.encoding_spec = get_encoding_spec(prev.encoding_version)
+    prev.value_head_trained = getattr(model, 'value_head_trained', True)
+
+    model.eval()
+    score = 0.0
+    for g in range(config.gate_games):
+        new_is_white = (g % 2 == 0)
+        board = chess.Board()
+        while (not board.is_game_over(claim_draw=True)
+               and len(board.move_stack) < config.gate_max_plies):
+            mover = (
+                model if (board.turn == chess.WHITE) == new_is_white else prev
+            )
+            temp = (
+                config.gate_temperature
+                if len(board.move_stack) < 20 else 0.0
+            )
+            uci = predict_next_move(mover, board, temperature=temp)
+            if uci is None:
+                break
+            board.push(chess.Move.from_uci(uci))
+        outcome = board.outcome(claim_draw=True)
+        if outcome is None or outcome.winner is None:
+            score += 0.5
+        elif (outcome.winner == chess.WHITE) == new_is_white:
+            score += 1.0
+    return score / max(config.gate_games, 1)
+
+
 def _save_checkpoint(model: ChessModel, optimizer: torch.optim.Optimizer,
                      path: str, iteration: int, extra: dict) -> None:
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
@@ -247,7 +397,7 @@ def _save_checkpoint(model: ChessModel, optimizer: torch.optim.Optimizer,
         'iteration': iteration,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'board_encoding': BOARD_ENCODING_VERSION,
+        'board_encoding': _model_encoding(model),
         'residual_filters': RESIDUAL_FILTERS,
         'residual_blocks': RESIDUAL_BLOCKS,
         # The supervised loader checks for these and refuses to load mismatches.
@@ -273,9 +423,11 @@ def run_iteration(
     self_play_config: SelfPlayConfig,
     training_config: TrainingConfig,
     seed: int | None,
+    supervised_buffer: ReplayBuffer | None = None,
 ) -> dict:
     """One self-play + training iteration. Returns a summary record."""
     iter_start = time.monotonic()
+    pre_iteration_state = _snapshot_state(model)
 
     # 1. Self-play
     sp_summary = generate_self_play_games(
@@ -295,9 +447,22 @@ def run_iteration(
     # 3. Train
     train_metrics: list[dict] = []
     train_start = time.monotonic()
+    supervised_per_batch = 0
+    if (supervised_buffer is not None
+            and supervised_buffer.total_positions() > 0
+            and training_config.supervised_fraction > 0):
+        supervised_per_batch = int(round(
+            training_config.batch_size * training_config.supervised_fraction
+        ))
+    self_play_per_batch = training_config.batch_size - supervised_per_batch
     if buffer_size > 0:
         for step in range(training_config.training_steps_per_iteration):
-            batch = buffer.sample_batch(training_config.batch_size)
+            batch = buffer.sample_batch(self_play_per_batch)
+            if supervised_per_batch > 0:
+                batch = merge_batches(
+                    batch,
+                    supervised_buffer.sample_batch(supervised_per_batch),
+                )
             if batch is None:
                 break
             metrics = distribution_train_step(
@@ -319,25 +484,52 @@ def run_iteration(
                 )
     train_elapsed = time.monotonic() - train_start
 
-    # 4. Checkpoint
+    # 4. Gate: the updated weights must hold their own against the
+    # pre-iteration weights, otherwise revert and stop the run. This is the
+    # guard against the catastrophic forgetting that sank the first attempt.
+    gate = None
+    if training_config.gate_games > 0 and train_metrics:
+        gate_start = time.monotonic()
+        gate_score = _gate_match(model, pre_iteration_state, training_config)
+        gate = {
+            'score': gate_score,
+            'games': training_config.gate_games,
+            'min_score': training_config.gate_min_score,
+            'passed': gate_score >= training_config.gate_min_score,
+            'elapsed_seconds': time.monotonic() - gate_start,
+        }
+        print(
+            f"  gate: score={gate_score:.3f} over "
+            f"{training_config.gate_games} games "
+            f"({'PASS' if gate['passed'] else 'FAIL — reverting weights'})"
+        )
+        if not gate['passed']:
+            model.load_state_dict(pre_iteration_state)
+            model.to(DEVICE)
+
+    # 5. Checkpoint (only weights that passed the gate are written)
     ckpt_path = os.path.join(
         training_config.checkpoint_dir,
         f'selfplay_iter{iteration:04d}.pt',
     )
     train_summary = _mean_metrics(train_metrics) if train_metrics else {}
-    _save_checkpoint(
-        model, optimizer, ckpt_path, iteration,
-        extra={
-            'value_loss_weight': training_config.value_loss_weight,
-            'iteration_self_play_games': training_config.games_per_iteration,
-            'iteration_training_steps': len(train_metrics),
-            'buffer_positions_after': buffer_size,
-            'mean_train_loss': train_summary.get('loss'),
-            'mean_policy_loss': train_summary.get('policy_loss'),
-            'mean_value_loss': train_summary.get('value_loss'),
-            'mean_top1_agreement': train_summary.get('top1_agreement'),
-        },
-    )
+    if gate is None or gate['passed']:
+        _save_checkpoint(
+            model, optimizer, ckpt_path, iteration,
+            extra={
+                'value_loss_weight': training_config.value_loss_weight,
+                'iteration_self_play_games': training_config.games_per_iteration,
+                'iteration_training_steps': len(train_metrics),
+                'buffer_positions_after': buffer_size,
+                'mean_train_loss': train_summary.get('loss'),
+                'mean_policy_loss': train_summary.get('policy_loss'),
+                'mean_value_loss': train_summary.get('value_loss'),
+                'mean_top1_agreement': train_summary.get('top1_agreement'),
+                'gate': gate,
+            },
+        )
+    else:
+        ckpt_path = None
 
     iter_elapsed = time.monotonic() - iter_start
     summary = {
@@ -347,9 +539,11 @@ def run_iteration(
         'chunk_added_positions': added,
         'buffer_positions': buffer_size,
         'training_steps': len(train_metrics),
+        'supervised_per_batch': supervised_per_batch,
         'training_elapsed_seconds': train_elapsed,
         'iteration_elapsed_seconds': iter_elapsed,
         'mean_train_metrics': train_summary,
+        'gate': gate,
         'checkpoint_path': ckpt_path,
     }
     _append_log(training_config.log_path, summary)
@@ -426,8 +620,14 @@ def run_loop(
         model = load_trained_model(MODEL_PATH)
     else:
         print("No checkpoint found — starting from a freshly-initialized model.")
-        model = ChessModel().to(DEVICE)
+        model, encoding = build_model(ARCH_VERSION)
+        model = model.to(DEVICE)
+        model.encoding_version = encoding
+        model.encoding_spec = get_encoding_spec(encoding)
         model.value_head_trained = True
+
+    encoding_version = _model_encoding(model)
+    print(f"Self-play encoding: {encoding_version}")
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -436,19 +636,72 @@ def run_loop(
     )
     scaler = torch.amp.GradScaler('cuda', enabled=DEVICE.type == 'cuda')
 
-    buffer = ReplayBuffer(capacity=training_config.replay_buffer_capacity)
+    buffer = ReplayBuffer(
+        capacity=training_config.replay_buffer_capacity,
+        encoding_version=encoding_version,
+    )
     if training_config.seed_buffer_from_dir:
         seeded = _seed_buffer_from_dir(buffer, training_config.chunks_dir)
         if seeded:
             print(f"Seeded buffer with {seeded} positions from {training_config.chunks_dir}")
 
+    supervised_buffer = None
+    if training_config.supervised_dirs:
+        supervised_buffer = ReplayBuffer(
+            capacity=training_config.supervised_capacity,
+            encoding_version=encoding_version,
+        )
+        paths = []
+        for directory in training_config.supervised_dirs.split(os.pathsep):
+            if directory:
+                paths.extend(
+                    sorted(glob.glob(os.path.join(directory, 'chunk_*.npz')))
+                )
+        np.random.shuffle(paths)
+        loaded = 0
+        for path in paths:
+            if loaded >= training_config.supervised_capacity:
+                break
+            try:
+                loaded += supervised_buffer.add_supervised_chunk_from_path(
+                    path,
+                    max_positions=(
+                        training_config.supervised_capacity - loaded
+                    ),
+                )
+            except Exception as exc:
+                print(f"  warning: skipped supervised chunk {path}: {exc}")
+        print(f"Supervised anchor buffer: {loaded:,} positions "
+              f"({training_config.supervised_fraction:.0%} of each batch)")
+        if loaded == 0:
+            # Training without the anchor is the exact catastrophic-forgetting
+            # setup that sank the first self-play run, so an empty anchor is
+            # a configuration error (usually an encoding mismatch between the
+            # bootstrap checkpoint and --supervised_dirs), never a warning.
+            raise RuntimeError(
+                f"Supervised anchor dirs {training_config.supervised_dirs!r} "
+                f"contributed 0 positions for encoding {encoding_version!r}. "
+                "Point --supervised_dirs at chunks matching the model's "
+                "encoding, or pass --supervised_dirs '' to explicitly train "
+                "without the anchor."
+            )
+
     for iteration in range(start_iteration, start_iteration + training_config.num_iterations):
         print(f"\n=== Iteration {iteration} ===")
-        run_iteration(
+        summary = run_iteration(
             iteration, model, optimizer, scaler, buffer,
             self_play_config, training_config,
             seed=(None if seed is None else seed + iteration),
+            supervised_buffer=supervised_buffer,
         )
+        gate = summary.get('gate')
+        if gate is not None and not gate['passed']:
+            print(
+                f"\nStopping: iteration {iteration} failed the gate "
+                f"(score {gate['score']:.3f} < {gate['min_score']:.2f}). "
+                "Weights were reverted to the last good state."
+            )
+            break
 
 
 def _build_configs(args) -> tuple[TrainingConfig, SelfPlayConfig]:
@@ -462,6 +715,11 @@ def _build_configs(args) -> tuple[TrainingConfig, SelfPlayConfig]:
         weight_decay=args.weight_decay,
         value_loss_weight=args.value_loss_weight,
         grad_clip=args.grad_clip,
+        supervised_dirs=args.supervised_dirs,
+        supervised_fraction=args.supervised_fraction,
+        supervised_capacity=args.supervised_capacity,
+        gate_games=args.gate_games,
+        gate_min_score=args.gate_min_score,
         chunks_dir=args.chunks_dir,
         checkpoint_dir=args.checkpoint_dir,
         log_path=args.log_path,
@@ -490,14 +748,25 @@ def main():
     )
     # Loop
     parser.add_argument('--iterations', type=int, default=20)
-    parser.add_argument('--games_per_iteration', type=int, default=50)
-    parser.add_argument('--training_steps', type=int, default=1000)
+    parser.add_argument('--games_per_iteration', type=int, default=200)
+    parser.add_argument('--training_steps', type=int, default=100)
     parser.add_argument('--start_iteration', type=int, default=1)
     parser.add_argument('--seed', type=int, default=None)
     # Training
     parser.add_argument('--batch_size', type=int, default=256)
-    parser.add_argument('--learning_rate', type=float, default=1e-3)
+    parser.add_argument('--learning_rate', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
+    # Supervised anchor data (prevents catastrophic forgetting)
+    parser.add_argument('--supervised_dirs', default='data/train_chunks_v3',
+                        help='os.pathsep-separated supervised chunk dirs mixed '
+                             'into every batch. Empty string disables mixing.')
+    parser.add_argument('--supervised_fraction', type=float, default=0.5)
+    parser.add_argument('--supervised_capacity', type=int, default=200_000)
+    # Per-iteration gate vs pre-iteration weights
+    parser.add_argument('--gate_games', type=int, default=24,
+                        help='Policy-mode games per gate match; 0 disables gating.')
+    parser.add_argument('--gate_min_score', type=float, default=0.45,
+                        help='Revert weights and stop if the gate score drops below this.')
     parser.add_argument('--value_loss_weight', type=float, default=1.0)
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--replay_buffer_capacity', type=int, default=200_000)

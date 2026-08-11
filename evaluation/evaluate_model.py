@@ -11,21 +11,28 @@ from torch.utils.data import DataLoader
 
 from load_model import _get_move_scores, evaluate_position, load_trained_model
 from neural_network import (
+    BOARD_ENCODING_VERSION,
+    BOARD_ENCODING_VERSION_V3,
     ChunkDataset,
     VALUE_LOSS_WEIGHT,
-    collate_policy_batch,
+    get_encoding_spec,
+    make_collate_policy_batch,
     mask_illegal_logits,
     policy_loss_for_targets,
 )
 
 
 def evaluate_chunks(model, test_dir, batch_size=512, top_k=(1, 3, 5)):
-    dataset = ChunkDataset(test_dir, shuffle=False)
+    # Dataset and collator follow the loaded checkpoint's encoding so both
+    # model generations can be measured against their own chunk format.
+    encoding = getattr(model, 'encoding_version', BOARD_ENCODING_VERSION)
+    spec = getattr(model, 'encoding_spec', None) or get_encoding_spec(encoding)
+    dataset = ChunkDataset(test_dir, shuffle=False, expected_encoding=encoding)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         num_workers=0,
-        collate_fn=collate_policy_batch,
+        collate_fn=make_collate_policy_batch(spec['move_vocab_size']),
     )
     value_criterion = torch.nn.MSELoss(reduction='none')
     max_k = max(top_k)
@@ -161,14 +168,23 @@ def main():
         description='Evaluate a trained ChessModel on held-out test chunks.'
     )
     parser.add_argument('--model', default=None, help='Path to model checkpoint.')
-    parser.add_argument('--test_dir', default=os.environ.get('TEST_DIR', 'data/test_chunks'))
+    parser.add_argument('--test_dir', default=os.environ.get('TEST_DIR'),
+                        help='Chunk dir; defaults to TEST_DIR env or the '
+                             'encoding-matched data/test_chunks[_v3].')
     parser.add_argument('--batch_size', type=int, default=512)
     parser.add_argument('--examples', type=int, default=5)
     parser.add_argument('--top_k', type=int, default=5)
     args = parser.parse_args()
 
     model = load_trained_model(args.model) if args.model else load_trained_model()
-    metrics = evaluate_chunks(model, args.test_dir, batch_size=args.batch_size)
+    test_dir = args.test_dir
+    if not test_dir:
+        encoding = getattr(model, 'encoding_version', BOARD_ENCODING_VERSION)
+        test_dir = ('data/test_chunks_v3'
+                    if encoding == BOARD_ENCODING_VERSION_V3
+                    else 'data/test_chunks')
+    print(f"Test chunks: {test_dir}")
+    metrics = evaluate_chunks(model, test_dir, batch_size=args.batch_size)
 
     print("\nHeld-out test metrics")
     print(f"  positions : {metrics['positions']:,} positive")
@@ -185,7 +201,7 @@ def main():
     print(f"  weighted top-3 acc : {metrics['weighted_top_3_acc']:.4f}")
     print(f"  weighted top-5 acc : {metrics['weighted_top_5_acc']:.4f}")
 
-    print_examples(model, args.test_dir, args.examples, args.top_k)
+    print_examples(model, test_dir, args.examples, args.top_k)
 
 
 if __name__ == '__main__':

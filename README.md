@@ -1,6 +1,6 @@
 # Chess AI - Vincent Do
 
-A playable chess application with multiple AI opponents, including a perspective ResNet + LSTM neural network (Magnus Carlsen NN) with optional MCTS search at inference. Runs as a browser app (Flask backend + static frontend) and as a Pygame desktop app.
+A playable chess application with multiple AI opponents, including a perspective ResNet neural network (Magnus Carlsen NN) with optional MCTS search at inference. Runs as a browser app (Flask backend + static frontend) and as a Pygame desktop app.
 
 **Live site:** https://vincentdo1.github.io/playable-chess-AI
 **Backend (Railway):** drives the live site for Alphabeta and Magnus.
@@ -20,7 +20,7 @@ A playable chess application with multiple AI opponents, including a perspective
 - **Random** — picks a legal move at random.
 - **Alphabeta** — minimax + alpha-beta pruning + endgame-aware heuristics.
 - **Stockfish** — UCI engine (desktop) or WebAssembly (browser).
-- **Magnus Carlsen NN** — perspective ResNet + LSTM with policy and value heads, trained on Magnus and GM games. Optionally wrapped in MCTS at inference for stronger, more tactical play.
+- **Magnus Carlsen NN** — perspective ResNet with policy and value heads, trained on Magnus and GM games (v3 conv-head by default; the older v2 ResNet+LSTM checkpoints stay loadable). Optionally wrapped in MCTS at inference for stronger, more tactical play.
 
 ---
 
@@ -34,15 +34,15 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements-local.txt
 
 # 2. Put a trained model in model/ (gitignored; you provide it)
-#    Default expected path: model/grandmaster_model_perspective_resnet_negatives_v2.pt
+#    Default expected path: model/grandmaster_resnet_v3.pt
 #    Either train it (see "Training") or copy in an existing checkpoint.
+#    Old v2 checkpoints also work: point MODEL_PATH at them.
 
 # 3. Verify the environment
 $env:REQUIRE_CUDA = "1"     # "0" for CPU
 python -m training.check_training_env
 
-# 4. Start the backend
-$env:MODEL_PATH = "model\grandmaster_model_perspective_resnet_negatives_v2.pt"
+# 4. Start the backend (serves model/grandmaster_resnet_v3.pt by default)
 $env:MAGNUS_USE_MCTS = "1"
 $env:MAGNUS_MCTS_SIMULATIONS = "200"
 python app.py
@@ -78,8 +78,10 @@ playable-chess-AI/
   inference/               NN-augmented inference
     mcts_player.py         PUCT/MCTS
     search_player.py       Alpha-beta with NN evaluator
+    blunder_guard.py       Shallow-search veto of material-losing policy moves
   training/                Training pipeline
     preprocess.py          PGN -> .npz chunks
+    dedup_positions.py     Cap duplicate (mostly opening) positions pre-retrain
     resume_training.py     Safe resumed supervised training
     check_training_env.py  CUDA/torch preflight
     extract_lichess_gm_vs_lower.py
@@ -111,14 +113,44 @@ Subpackages use absolute import paths (`from inference.mcts_player import ...`).
 
 Three stages, optionally chained by `scripts/train_pipeline.sh`.
 
+### Architectures
+
+Two model generations coexist; serving dispatches on the checkpoint's stored
+`board_encoding`, so old checkpoints keep working:
+
+| | v2 (`perspective_v2`) | v3 (`perspective_v3`, current default) |
+|---|---|---|
+| Board input | 17 channels | 20 channels (+ halfmove clock, 2 repetition planes) |
+| Move history | LSTM over last 10 moves | none (history measured ~1% and caused a FEN-only serving skew) |
+| Policy head | FC 128 → 20,480 flat vocab | conv → 76 move-type planes × 64 from-squares (vocab 4,864) |
+| Value head | FC off shared 128-dim trunk | conv directly off tower features |
+| Regularization | none | AdamW weight decay 5e-4, label smoothing 0.05, head dropout 0.1 |
+
+Select with `ARCH_VERSION=v2|v3` (training only). Each architecture's
+training defaults write to its own checkpoint file and read its own
+`data/*_chunks*` dirs, so neither generation ever overwrites the other.
+Serving defaults to `model/grandmaster_resnet_v3.pt` — measured +137 Elo
+(95% CI [+40, +261]) over the resumed v2 in greedy policy mode — and
+dispatches on the checkpoint's stored encoding, so `MODEL_PATH` can point
+at any v2 or v3 checkpoint.
+
 ### 1. Preprocess
 
 ```powershell
-python -m training.preprocess              # uses Stockfish if available
+python -m training.preprocess              # v3 chunks -> data/*_chunks_v3
 python -m training.preprocess --no_cp_loss # game-result value targets only
+$env:PREPROCESS_ENCODING = "perspective_v2"  # legacy v2 chunks if needed
 ```
 
-Reads `extractions/GM_games_2600.zip` and `extractions/magnus.zip`, writes `data/{train,val,test}_chunks/`. The board tensor has 17 perspective-relative channels.
+Reads `extractions/GM_games_2600.zip` and `extractions/magnus.zip`, writes `data/{train,val,test}_chunks_v3/`.
+
+Optionally cap duplicated opening positions before training (82% of v2
+opening samples were repeats, which starves middlegame learning):
+
+```powershell
+python -m training.dedup_positions --input_dir data/train_chunks_v3 `
+  --output_dir data/train_chunks_v3_dedup --max_repeats 4
+```
 
 Adding Lichess strong-vs-weak as negatives:
 
@@ -137,12 +169,14 @@ python -m training.preprocess `
 ### 2. Supervised training
 
 ```powershell
-$env:TRAIN_DIR    = "data/train_chunks"
-$env:VAL_DIR      = "data/val_chunks"
-$env:MODEL_PATH   = "model/grandmaster_model_perspective_resnet_negatives_v2.pt"
 $env:REQUIRE_CUDA = "1"
 python neural_network.py
 ```
+
+v3 by default: reads `data/{train,val}_chunks_v3`, writes
+`model/grandmaster_resnet_v3.pt`. Set `ARCH_VERSION=v2` for the legacy
+architecture (reads `data/{train,val}_chunks`, writes the v2 checkpoint);
+`TRAIN_DIR`/`VAL_DIR`/`MODEL_PATH` override any of the paths.
 
 Up to 50 epochs, early stopping, AMP + cuDNN benchmark enabled. Set `INIT_MODEL_PATH` to warm-start from a previous checkpoint (current architecture only).
 
@@ -175,11 +209,14 @@ Three tools.
 
 ```powershell
 python -m evaluation.eval_arena `
-  --model_a model\grandmaster_resnet_v2_resumed.pt `
-  --model_b model\grandmaster_model_perspective_resnet_negatives_v2.pt `
+  --model_a model\grandmaster_resnet_v3.pt `
+  --model_b model\grandmaster_resnet_v2_resumed.pt `
   --method_a mcts --method_b mcts `
   --paired --games 128 --sims 200 --mcts_batch_size 16
 ```
+
+(Greedy policy-mode baseline, 32 paired games, 2026-07-02: v3 beat
+v2-resumed 17W-10D-5L, +137 Elo, 95% CI [+40, +261].)
 
 Methods per side: `mcts`, `policy`, or `search`.
 
@@ -205,10 +242,27 @@ python -m evaluation.cross_model_match `
   -Sims 200 -Games 128
 ```
 
-For held-out test-set metrics:
+For held-out test-set metrics (defaults to the served checkpoint and its
+encoding-matched `data/test_chunks[_v3]`; pass `--model`/`--test_dir` to
+measure another one):
 
 ```powershell
-python -m evaluation.evaluate_model --model $env:MODEL_PATH --examples 10
+python -m evaluation.evaluate_model --examples 10
+```
+
+**Phase diagnostics** — why does play degrade as the game goes on?
+
+```powershell
+# Policy/value quality by move-number bucket; also quantifies the
+# FEN-only (zero move history) serving skew vs eval conditions.
+python -m evaluation.diagnose_phase_degradation --max_positions 150000
+
+# Stockfish cp-loss of the move the live backend would actually play,
+# policy-only vs value-reranked, per phase.
+python -m evaluation.diagnose_value_rerank --per_phase 150
+
+# Same protocol, measuring the inference/blunder_guard.py effect.
+python -m evaluation.diagnose_blunder_guard --per_phase 150 --guard_depth 2
 ```
 
 ---
@@ -219,12 +273,23 @@ AlphaZero-style: the network plays itself with MCTS, training targets are MCTS v
 
 ```powershell
 python -m experiments.train_self_play `
-  --init_checkpoint model\grandmaster_model_perspective_resnet_negatives_v2.pt `
-  --iterations 20 --games_per_iteration 50 --training_steps 1000 `
+  --init_checkpoint model\grandmaster_resnet_v3.pt `
+  --iterations 20 `
   --mcts_simulations 400 --mcts_batch_size 16
 ```
 
-In our runs this caused catastrophic forgetting (iter20 much weaker than the supervised base). Kept for future experiments with lower LR, fewer training steps per iteration, and supervised data mixed into the replay buffer. Don't deploy a self-play checkpoint without beating the base in `eval_arena`.
+The first attempt (LR 1e-3, 1000 steps/iter, 50 games/iter, self-play-only
+buffer) collapsed from catastrophic forgetting — iter20 lost 20-0 to its
+base. The defaults now implement the retry recipe:
+
+- LR `1e-4`, `100` training steps/iter, `200` games/iter
+- supervised chunks mixed into every batch (`--supervised_dirs`,
+  default `data/train_chunks_v3`, 50/50 via `--supervised_fraction`)
+- after each iteration a `--gate_games` policy-mode match runs against the
+  pre-iteration weights; scoring under `--gate_min_score` (0.45) reverts the
+  weights and stops the run. Failed iterations write no checkpoint.
+
+Still don't deploy a self-play checkpoint without beating the base in `eval_arena`.
 
 ---
 
@@ -233,7 +298,8 @@ In our runs this caused catastrophic forgetting (iter20 much weaker than the sup
 `backend/app.py` is the Flask app served on port 5000. Root `app.py` is the Procfile-compatible entry.
 
 ```powershell
-$env:MODEL_PATH         = "model/grandmaster_model_perspective_resnet_negatives_v2.pt"
+# MODEL_PATH defaults to model/grandmaster_resnet_v3.pt; set it to serve
+# a different checkpoint (v2 files still load).
 $env:MAGNUS_USE_MCTS    = "1"
 $env:MAGNUS_MCTS_SIMULATIONS = "200"
 python app.py
@@ -257,10 +323,13 @@ Per-request fields override the server's env defaults. The response includes `"m
 
 | Var | Default | Purpose |
 |---|---|---|
-| `MODEL_PATH` | `model/grandmaster_model_perspective_resnet_negatives_v2.pt` | Path to checkpoint |
+| `MODEL_PATH` | `model/grandmaster_resnet_v3.pt` | Path to checkpoint (v2 checkpoints also load) |
 | `MAGNUS_TEMPERATURE` | `0.0` | Policy sampling temperature |
 | `MAGNUS_VALUE_WEIGHT` | `2.0` | Value-head reranking weight (policy mode) |
 | `MAGNUS_VALUE_CANDIDATES` | `0` | Top-K policy candidates to value-check (0 = all) |
+| `MAGNUS_BLUNDER_GUARD` | `1` | Shallow-search veto of material-losing policy moves (policy mode) |
+| `MAGNUS_BLUNDER_GUARD_DEPTH` | `2` | Guard search depth (2 ≈ 20 ms/move, 3 ≈ 130 ms/move) |
+| `MAGNUS_BLUNDER_GUARD_MARGIN` | `150` | Veto candidates this many cp worse than the best candidate |
 | `MAGNUS_USE_MCTS` | `0` | Enable MCTS globally |
 | `MAGNUS_MCTS_SIMULATIONS` | `200` | Sims per move |
 | `MAGNUS_MCTS_BATCH` | `16` | Leaf-eval batch size |
@@ -271,10 +340,10 @@ Per-request fields override the server's env defaults. The response includes `"m
 
 ## Desktop app (Pygame)
 
-Loads the model directly (no backend). Set `MODEL_PATH` first if Magnus is playing:
+Loads the model directly (no backend); `MODEL_PATH` defaults to
+`model/grandmaster_resnet_v3.pt`:
 
 ```powershell
-$env:MODEL_PATH = "model\grandmaster_model_perspective_resnet_negatives_v2.pt"
 python main.py --black_player magnus_carlsen
 ```
 
@@ -290,7 +359,7 @@ To redeploy after model or backend changes:
 
 1. **Push to `main`** — GitHub Pages picks up the frontend. Railway picks up the backend.
 2. **Make sure the model file exists on Railway.** Because `model/` is gitignored, `git push` does **not** ship the checkpoint. Options:
-   - **Railway Volume** (recommended): create a persistent volume mounted at `/app/model/`, upload your `.pt` file once via the Railway shell (`cat > model/grandmaster_model_perspective_resnet_negatives_v2.pt` with the file streamed in), and set `MODEL_PATH` to that path.
+   - **Railway Volume** (recommended): create a persistent volume mounted at `/app/model/`, upload your `.pt` file once via the Railway shell (`cat > model/grandmaster_resnet_v3.pt` with the file streamed in), and set `MODEL_PATH` to that path.
    - **Build-time download**: have your start command pull the model from an external URL (S3, Hugging Face, etc.) before launching the Flask app.
    - **Force-commit via git LFS**: track `.pt` files via Git LFS and remove `model/` from `.gitignore`. Simple but couples the model lifecycle to git history.
 3. **Set Railway env vars**: `MODEL_PATH`, optionally `MAGNUS_USE_MCTS=1` / `MAGNUS_MCTS_SIMULATIONS=200` for stronger play.

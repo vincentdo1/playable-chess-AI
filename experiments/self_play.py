@@ -36,13 +36,12 @@ import numpy as np
 import torch
 
 from neural_network import (
+    BOARD_ENCODING_VERSION,
     ChessModel,
     MOVE_VOCAB_SIZE,
-    fen_to_tensor,
-    move_sequence_to_vector,
-    move_to_policy_index,
+    get_encoding_spec,
 )
-from load_model import load_trained_model
+from load_model import load_trained_model, _model_encoding, _position_arrays
 from inference.mcts_player import mcts_search, select_move_from_root
 
 
@@ -69,8 +68,8 @@ class SelfPlayConfig:
 @dataclass
 class GameRecord:
     """Per-position training data plus aggregate game metadata."""
-    boards: np.ndarray            # (T, 8, 8, 17) float32
-    move_seqs: np.ndarray         # (T, 10, 132) float32
+    boards: np.ndarray            # (T, 8, 8, C) float32 — C per board encoding
+    move_seqs: np.ndarray | None  # (T, 10, 132) float32 for v2; None for v3
     legal_move_indices: np.ndarray  # (M,) int32 — concatenated legal indices
     legal_move_offsets: np.ndarray  # (T+1,) int64 — offsets into legal_move_indices
     visit_counts: np.ndarray        # (M,) int32 — parallel to legal_move_indices
@@ -91,6 +90,9 @@ def play_self_play_game(
         rng = np.random.default_rng()
 
     board = chess.Board()
+    encoding_version = _model_encoding(model)
+    spec = get_encoding_spec(encoding_version)
+    move_to_index = spec['move_to_index']
 
     boards_list: list[np.ndarray] = []
     move_seqs_list: list[np.ndarray] = []
@@ -106,11 +108,8 @@ def play_self_play_game(
             break
 
         is_black = (board.turn == chess.BLACK)
-        position_board = fen_to_tensor(board.fen(), flip=is_black)
-        position_moves = move_sequence_to_vector(
-            list(board.move_stack[-10:]),
-            max_length=10,
-            flip=is_black,
+        position_board, position_moves = _position_arrays(
+            board, encoding_version
         )
 
         root, _ = mcts_search(
@@ -134,7 +133,7 @@ def play_self_play_game(
         visit_counts_for_pos: list[int] = []
         for move, child in root.children.items():
             legal_indices_for_pos.append(
-                move_to_policy_index(move, flip=is_black)
+                move_to_index(move, flip=is_black)
             )
             visit_counts_for_pos.append(child.visit_count)
 
@@ -149,7 +148,8 @@ def play_self_play_game(
             break
 
         boards_list.append(position_board)
-        move_seqs_list.append(position_moves)
+        if position_moves is not None:
+            move_seqs_list.append(position_moves)
         legal_indices_list.append(
             np.asarray(legal_indices_for_pos, dtype=np.int32)
         )
@@ -183,10 +183,12 @@ def play_self_play_game(
             value_targets[i] = 1.0 if (winner == chess.WHITE) == is_white else -1.0
     # else: all zeros (draw)
 
+    uses_history = spec['uses_move_history']
     if T == 0:
         return GameRecord(
-            boards=np.empty((0, 8, 8, 17), dtype=np.float32),
-            move_seqs=np.empty((0, 10, 132), dtype=np.float32),
+            boards=np.empty((0, 8, 8, spec['board_channels']), dtype=np.float32),
+            move_seqs=(np.empty((0, 10, 132), dtype=np.float32)
+                       if uses_history else None),
             legal_move_indices=np.empty(0, dtype=np.int32),
             legal_move_offsets=np.zeros(1, dtype=np.int64),
             visit_counts=np.empty(0, dtype=np.int32),
@@ -205,7 +207,8 @@ def play_self_play_game(
 
     return GameRecord(
         boards=np.stack(boards_list).astype(np.float32),
-        move_seqs=np.stack(move_seqs_list).astype(np.float32),
+        move_seqs=(np.stack(move_seqs_list).astype(np.float32)
+                   if uses_history else None),
         legal_move_indices=legal_move_indices,
         legal_move_offsets=offsets,
         visit_counts=visit_counts,
@@ -221,22 +224,33 @@ def _save_chunk(
     output_path: str,
     records: list[GameRecord],
     config: SelfPlayConfig,
+    encoding_version: str = BOARD_ENCODING_VERSION,
 ) -> int:
     """Concatenate records into one .npz chunk. Returns number of positions saved."""
+    spec = get_encoding_spec(encoding_version)
+    extra = {}
     if not records:
+        if spec['uses_move_history']:
+            extra['move_seqs'] = np.empty((0, 10, 132), dtype=np.float32)
         np.savez_compressed(
             output_path,
-            boards=np.empty((0, 8, 8, 17), dtype=np.float32),
-            move_seqs=np.empty((0, 10, 132), dtype=np.float32),
+            boards=np.empty(
+                (0, 8, 8, spec['board_channels']), dtype=np.float32
+            ),
+            board_encoding=np.array(encoding_version, dtype=np.str_),
             legal_move_indices=np.empty(0, dtype=np.int32),
             legal_move_offsets=np.zeros(1, dtype=np.int64),
             visit_counts=np.empty(0, dtype=np.int32),
             value_target=np.empty(0, dtype=np.float32),
+            **extra,
         )
         return 0
 
     boards = np.concatenate([r.boards for r in records], axis=0)
-    move_seqs = np.concatenate([r.move_seqs for r in records], axis=0)
+    if spec['uses_move_history']:
+        extra['move_seqs'] = np.concatenate(
+            [r.move_seqs for r in records], axis=0
+        )
     value_targets = np.concatenate([r.value_targets for r in records], axis=0)
 
     # Offsets need to be rebased across the concatenated games.
@@ -259,11 +273,12 @@ def _save_chunk(
     np.savez_compressed(
         output_path,
         boards=boards,
-        move_seqs=move_seqs,
+        board_encoding=np.array(encoding_version, dtype=np.str_),
         legal_move_indices=legal_move_indices,
         legal_move_offsets=legal_move_offsets,
         visit_counts=visit_counts,
         value_target=value_targets,
+        **extra,
     )
     return len(boards)
 
@@ -311,7 +326,10 @@ def generate_self_play_games(
                 f"{n_positions} positions saved, {elapsed:.1f}s)"
             )
 
-    n_positions_total = _save_chunk(chunk_path, records, config)
+    n_positions_total = _save_chunk(
+        chunk_path, records, config,
+        encoding_version=_model_encoding(model),
+    )
     total_elapsed = time.monotonic() - start
 
     summary = {

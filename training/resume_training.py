@@ -64,20 +64,33 @@ from torch.utils.data import DataLoader
 import neural_network as N
 
 
-def _build_loaders():
-    train_ds = N.ChunkDataset(N.TRAIN_DIR, shuffle=True)
-    val_ds = N.ChunkDataset(N.VAL_DIR, shuffle=False)
+def _build_loaders(encoding_version):
+    spec = N.get_encoding_spec(encoding_version)
+    collate_fn = N.make_collate_policy_batch(spec['move_vocab_size'])
+
+    # Default chunk dirs follow the checkpoint's encoding unless overridden.
+    train_dir, val_dir = N.TRAIN_DIR, N.VAL_DIR
+    if encoding_version == N.BOARD_ENCODING_VERSION_V3:
+        if not (os.environ.get('TRAIN_DIRS') or os.environ.get('TRAIN_DIR')):
+            train_dir = 'data/train_chunks_v3'
+        if not (os.environ.get('VAL_DIRS') or os.environ.get('VAL_DIR')):
+            val_dir = 'data/val_chunks_v3'
+
+    train_ds = N.ChunkDataset(train_dir, shuffle=True,
+                              expected_encoding=encoding_version)
+    val_ds = N.ChunkDataset(val_dir, shuffle=False,
+                            expected_encoding=encoding_version)
     train_loader = DataLoader(
         train_ds, batch_size=N.BATCH_SIZE, num_workers=N.TRAIN_NUM_WORKERS,
         pin_memory=N.DEVICE.type == 'cuda',
         persistent_workers=N.TRAIN_NUM_WORKERS > 0,
-        collate_fn=N.collate_policy_batch,
+        collate_fn=collate_fn,
     )
     val_loader = DataLoader(
         val_ds, batch_size=N.BATCH_SIZE, num_workers=N.VAL_NUM_WORKERS,
         pin_memory=N.DEVICE.type == 'cuda',
         persistent_workers=N.VAL_NUM_WORKERS > 0,
-        collate_fn=N.collate_policy_batch,
+        collate_fn=collate_fn,
     )
     return train_loader, val_loader
 
@@ -138,7 +151,14 @@ def main() -> int:
         raise SystemExit(f"--init checkpoint not found: {args.init}")
     checkpoint = torch.load(args.init, map_location=device, weights_only=False)
 
-    model = N.ChessModel().to(device)
+    encoding_version = (
+        checkpoint.get('board_encoding') or N.BOARD_ENCODING_VERSION
+    )
+    if encoding_version == N.BOARD_ENCODING_VERSION_V3:
+        model = N.ChessModelV3().to(device)
+    else:
+        model = N.ChessModel().to(device)
+    print(f"Checkpoint encoding: {encoding_version}")
     load_result, skipped = N.load_compatible_state_dict(model, checkpoint)
     if load_result.missing_keys:
         print(f"  Newly initialized (were missing): {load_result.missing_keys}")
@@ -156,7 +176,7 @@ def main() -> int:
     print(f"Loaded {args.init}")
     print(f"  Recorded val_loss in checkpoint: {recorded_val}")
 
-    train_loader, val_loader = _build_loaders()
+    train_loader, val_loader = _build_loaders(encoding_version)
 
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
@@ -225,7 +245,7 @@ def main() -> int:
                 'val_policy_loss': val_metrics['policy_loss'],
                 'val_value_loss': val_metrics['value_loss'],
                 'val_value_mae': val_metrics['value_mae'],
-                'board_encoding': N.BOARD_ENCODING_VERSION,
+                'board_encoding': encoding_version,
                 'residual_filters': N.RESIDUAL_FILTERS,
                 'residual_blocks': N.RESIDUAL_BLOCKS,
                 'value_loss_weight': N.VALUE_LOSS_WEIGHT,

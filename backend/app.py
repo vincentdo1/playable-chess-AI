@@ -29,6 +29,10 @@ def _env_flag(name, default=False):
 
 
 DEFAULT_MAGNUS_USE_MCTS = _env_flag('MAGNUS_USE_MCTS', default=False)
+# Shallow-search veto of material-losing policy moves (policy mode only).
+DEFAULT_MAGNUS_BLUNDER_GUARD = _env_flag('MAGNUS_BLUNDER_GUARD', default=True)
+DEFAULT_MAGNUS_BLUNDER_GUARD_DEPTH = int(os.environ.get('MAGNUS_BLUNDER_GUARD_DEPTH', '2'))
+DEFAULT_MAGNUS_BLUNDER_GUARD_MARGIN = float(os.environ.get('MAGNUS_BLUNDER_GUARD_MARGIN', '150'))
 DEFAULT_MAGNUS_MCTS_SIMULATIONS = int(os.environ.get('MAGNUS_MCTS_SIMULATIONS', '200'))
 # Hard ceiling on request-supplied sims so a public endpoint can't be forced
 # into unbounded CPU work. Raise via env if you run on stronger hardware.
@@ -72,6 +76,7 @@ def health():
             'temperature': DEFAULT_MAGNUS_TEMPERATURE,
             'value_weight': DEFAULT_MAGNUS_VALUE_WEIGHT,
             'value_candidates': DEFAULT_MAGNUS_VALUE_CANDIDATES,
+            'blunder_guard': DEFAULT_MAGNUS_BLUNDER_GUARD,
             'use_mcts': DEFAULT_MAGNUS_USE_MCTS and _mcts_fn is not None,
             'mcts_simulations': DEFAULT_MAGNUS_MCTS_SIMULATIONS,
             'mcts_available': _mcts_fn is not None,
@@ -173,12 +178,16 @@ def _get_magnus_move(board, data):
             'temperature': temperature,
         }, 200
 
+    blunder_guard = bool(data.get('blunder_guard', DEFAULT_MAGNUS_BLUNDER_GUARD))
     uci = _predict_fn(
         _magnus_model,
         board,
         temperature=temperature,
         value_weight=value_weight,
         value_candidate_limit=value_candidates,
+        blunder_guard=blunder_guard,
+        blunder_guard_depth=DEFAULT_MAGNUS_BLUNDER_GUARD_DEPTH,
+        blunder_guard_margin_cp=DEFAULT_MAGNUS_BLUNDER_GUARD_MARGIN,
     )
     if uci is None:
         return {'error': 'Magnus model returned no move'}, 500
@@ -190,6 +199,7 @@ def _get_magnus_move(board, data):
         'temperature': temperature,
         'value_weight': value_weight,
         'value_candidates': value_candidates,
+        'blunder_guard': blunder_guard,
     }, 200
 
 
