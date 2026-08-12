@@ -11,15 +11,19 @@ import glob
 import os
 import re
 import zipfile
+from collections import Counter
+
 import numpy as np
 import chess
 import chess.engine
 import chess.pgn
+import chess.polyglot
 
 import chess_player
 from neural_network import (
-    BOARD_ENCODING_VERSION, fen_to_tensor, legal_policy_indices,
-    move_sequence_to_vector, move_to_policy_index
+    BOARD_ENCODING_VERSION, BOARD_ENCODING_VERSION_V3, BOARD_CHANNELS_V3,
+    HALFMOVE_CLOCK_SCALE, V3_EXTRA_CHANNELS, fen_to_tensor,
+    get_encoding_spec, move_sequence_to_vector, set_repetition_planes_v3
 )
 
 # Config. Environment variables can override these defaults.
@@ -37,9 +41,18 @@ MAGNUS_EVAL_PGN = os.environ.get(
     'MAGNUS_EVAL_PGN', 'magnus_eval.pgn'
 )  # name of the eval file inside MAGNUS_ZIP
 
-TRAIN_DIR = os.environ.get('TRAIN_DIR', 'data/train_chunks')
-VAL_DIR = os.environ.get('VAL_DIR', 'data/val_chunks')
-TEST_DIR = os.environ.get('TEST_DIR', 'data/test_chunks')
+# v3 is the default encoding for new chunks. The v3-suffixed default dirs
+# keep the old v2 chunks intact so the previous model stays reproducible.
+PREPROCESS_ENCODING = os.environ.get(
+    'PREPROCESS_ENCODING', BOARD_ENCODING_VERSION_V3
+)
+ENCODING_SPEC = get_encoding_spec(PREPROCESS_ENCODING)
+_IS_V3 = PREPROCESS_ENCODING == BOARD_ENCODING_VERSION_V3
+_DIR_SUFFIX = '_v3' if _IS_V3 else ''
+
+TRAIN_DIR = os.environ.get('TRAIN_DIR', f'data/train_chunks{_DIR_SUFFIX}')
+VAL_DIR = os.environ.get('VAL_DIR', f'data/val_chunks{_DIR_SUFFIX}')
+TEST_DIR = os.environ.get('TEST_DIR', f'data/test_chunks{_DIR_SUFFIX}')
 
 CHUNK_SIZE       = 50_000  # positions per .npz file
 SEQ_LEN          = 10
@@ -350,6 +363,19 @@ def _calculate_cp_loss(board, move, comment, next_comment, engine,
     except Exception:
         return UNKNOWN_CP_LOSS
 
+def _board_tensor_for_encoding(board, fen, is_black, seen_before):
+    """Build the board tensor for the configured chunk encoding."""
+    base = fen_to_tensor(fen, flip=is_black)
+    if not _IS_V3:
+        return base
+    tensor = np.zeros((8, 8, BOARD_CHANNELS_V3), dtype=np.float32)
+    tensor[:, :, :base.shape[2]] = base
+    tensor[:, :, V3_EXTRA_CHANNELS['halfmove_clock']] = min(
+        float(board.halfmove_clock) / HALFMOVE_CLOCK_SCALE, 1.0
+    )
+    return set_repetition_planes_v3(tensor, seen_before)
+
+
 def open_pgn(source, pgn_name=None):
     """Open a PGN file from a .pgn path or inside a .zip. Returns a text file object."""
     if isinstance(source, str) and source.endswith('.pgn'):
@@ -508,6 +534,7 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
             board = game.board()
             recent_moves = []
             training_color = _training_policy_color(game.headers)
+            position_counts = Counter()
 
             for node in game.mainline():
                 move    = node.move
@@ -534,7 +561,11 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
                         invalid_engine_best += 1
 
                 is_black = (board.turn == chess.BLACK)
-                board_tensor = fen_to_tensor(fen, flip=is_black)
+                position_key_hash = chess.polyglot.zobrist_hash(board)
+                seen_before = position_counts[position_key_hash]
+                board_tensor = _board_tensor_for_encoding(
+                    board, fen, is_black, seen_before
+                )
 
                 try:
                     if move not in board.legal_moves:
@@ -556,10 +587,13 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
                             TAGGED_POSITIVE_CP_LOSS
                         )
                     )
-                    policy_idx = move_to_policy_index(move, flip=is_black)
-                    legal_indices = legal_policy_indices(board, flip=is_black)
-                    move_seq = move_sequence_to_vector(recent_moves, flip=is_black,
-                                                       max_length=sequence_length)
+                    policy_idx = ENCODING_SPEC['move_to_index'](move, flip=is_black)
+                    legal_indices = ENCODING_SPEC['legal_indices'](board, flip=is_black)
+                    move_seq = (
+                        move_sequence_to_vector(recent_moves, flip=is_black,
+                                                max_length=sequence_length)
+                        if ENCODING_SPEC['uses_move_history'] else None
+                    )
                     position_eval_cp = None
                     if analyze_this_move:
                         try:
@@ -634,7 +668,7 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
                     if save_positive:
                         for search_move, search_loss in (
                                 _search_assisted_negative_moves(board, move)):
-                            search_policy_idx = move_to_policy_index(
+                            search_policy_idx = ENCODING_SPEC['move_to_index'](
                                 search_move, flip=is_black
                             )
                             search_bucket = _cp_loss_bucket(search_loss)
@@ -678,7 +712,8 @@ def preprocess_pgn(source, pgn_name=None, output_dir=None,
                 recent_moves.append(move)
                 if len(recent_moves) > sequence_length:
                     recent_moves.pop(0)
-                    
+
+                position_counts[position_key_hash] += 1
                 board.push(move)
 
                 if len(boards_buf) >= chunk_size:
@@ -780,11 +815,14 @@ def _save_chunk(output_dir, chunk_idx, boards, moves, move_idx,
     else:
         legal_move_indices = np.array([], dtype=np.int32)
 
+    arrays = {}
+    if ENCODING_SPEC['uses_move_history']:
+        # v3 has no LSTM, so no move-history arrays are stored.
+        arrays['moves'] = np.array(moves, dtype=np.float32)
     np.savez_compressed(
         path,
         boards  = np.array(boards,  dtype=np.float32),
-        board_encoding = np.array(BOARD_ENCODING_VERSION, dtype=np.str_),
-        moves   = np.array(moves,   dtype=np.float32),
+        board_encoding = np.array(PREPROCESS_ENCODING, dtype=np.str_),
         move_idx = np.array(move_idx, dtype=np.int32),
         policy_target_type = np.array(policy_target_type, dtype=np.int8),
         fen = np.array(fen, dtype=np.str_),
@@ -798,6 +836,7 @@ def _save_chunk(output_dir, chunk_idx, boards, moves, move_idx,
         cp_loss_bucket = np.array(cp_loss_bucket, dtype=np.int8),
         value_target = np.array(value_target, dtype=np.float32),
         value_source = np.array(value_source, dtype=np.int8),
+        **arrays,
     )
 
 def _section(title, source, pgn_name=None):

@@ -15,9 +15,8 @@ from torch.utils.data import DataLoader
 # Config
 TRAIN_DIR  = os.environ.get('TRAIN_DIRS', os.environ.get('TRAIN_DIR', 'data/train_chunks'))
 VAL_DIR    = os.environ.get('VAL_DIRS', os.environ.get('VAL_DIR', 'data/val_chunks'))
-MODEL_PATH = os.environ.get(
-    'MODEL_PATH', 'model/grandmaster_model_perspective_resnet_negatives_v2.pt'
-)
+MODEL_PATH = os.environ.get('MODEL_PATH', 'model/grandmaster_resnet_v3.pt')
+MODEL_PATH_V2 = 'model/grandmaster_model_perspective_resnet_negatives_v2.pt'
 INIT_MODEL_PATH = os.environ.get('INIT_MODEL_PATH')
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', '512'))
 EPOCHS     = int(os.environ.get('EPOCHS', '50'))
@@ -107,6 +106,14 @@ def print_device_info():
         )
 
 BOARD_ENCODING_VERSION = 'perspective_v2'
+BOARD_ENCODING_VERSION_V3 = 'perspective_v3'
+# Which architecture neural_network.py trains. Serving (load_model.py)
+# dispatches on the checkpoint's stored encoding instead, so old v2
+# checkpoints stay loadable regardless of this setting.
+ARCH_VERSION = os.environ.get('ARCH_VERSION', 'v3')
+WEIGHT_DECAY = float(os.environ.get('WEIGHT_DECAY', '5e-4'))
+LABEL_SMOOTHING = float(os.environ.get('LABEL_SMOOTHING', '0.05'))
+HEAD_DROPOUT = float(os.environ.get('HEAD_DROPOUT', '0.1'))
 
 piece_to_index = {
     'own_pawn': 0, 'own_knight': 1, 'own_bishop': 2,
@@ -216,6 +223,152 @@ def legal_policy_indices(board: chess.Board, flip: bool = False):
         dtype=np.int32,
     )
 
+# ---------------------------------------------------------------------------
+# v3 encoding: 20 board channels (17 + halfmove clock + 2 repetition planes)
+# and a spatial move vocabulary of from-square x 76 move-type planes
+# (56 queen-type direction/distance, 8 knight, 12 promotion). Replaces the
+# flat 64x64x5 vocab so the policy head can stay convolutional.
+# ---------------------------------------------------------------------------
+
+V3_EXTRA_CHANNELS = {'halfmove_clock': 17, 'repetition_1': 18, 'repetition_2': 19}
+BOARD_CHANNELS_V3 = BOARD_CHANNELS + len(V3_EXTRA_CHANNELS)
+HALFMOVE_CLOCK_SCALE = 100.0
+
+# Direction order is fixed; never reorder without bumping the encoding name.
+_QUEEN_DIRS = (
+    (-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)
+)
+_QUEEN_DIR_TO_INDEX = {d: i for i, d in enumerate(_QUEEN_DIRS)}
+_KNIGHT_OFFSETS = (
+    (-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)
+)
+_KNIGHT_OFFSET_TO_INDEX = {d: i for i, d in enumerate(_KNIGHT_OFFSETS)}
+_PROMO_PIECES_V3 = (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN)
+_PROMO_PIECE_TO_INDEX = {p: i for i, p in enumerate(_PROMO_PIECES_V3)}
+_QUEEN_PLANES = 8 * 7          # planes 0..55
+_KNIGHT_PLANE_BASE = 56        # planes 56..63
+_PROMO_PLANE_BASE = 64         # planes 64..75: 3 directions x 4 pieces
+NUM_MOVE_PLANES = 76
+MOVE_VOCAB_SIZE_V3 = 64 * NUM_MOVE_PLANES
+
+
+def board_to_tensor_v3(board: chess.Board, flip: bool | None = None):
+    """Board -> 8x8x20 perspective tensor with clock/repetition planes.
+
+    Repetition planes use the board's move stack: a board rebuilt from FEN
+    only (no history) gets zero repetition planes, matching what the model
+    sees for fresh positions. In the perspective frame the side to move
+    always advances toward increasing row.
+    """
+    if flip is None:
+        flip = board.turn == chess.BLACK
+    tensor = np.zeros((8, 8, BOARD_CHANNELS_V3), dtype=np.float32)
+    tensor[:, :, :BOARD_CHANNELS] = fen_to_tensor(board.fen(), flip=flip)
+    clock = min(float(board.halfmove_clock) / HALFMOVE_CLOCK_SCALE, 1.0)
+    tensor[:, :, V3_EXTRA_CHANNELS['halfmove_clock']] = clock
+    if board.move_stack:
+        if board.is_repetition(2):
+            tensor[:, :, V3_EXTRA_CHANNELS['repetition_1']] = 1.0
+        if board.is_repetition(3):
+            tensor[:, :, V3_EXTRA_CHANNELS['repetition_2']] = 1.0
+    return tensor
+
+
+def set_repetition_planes_v3(tensor, seen_before: int):
+    """Preprocessing path: set repetition planes from a prior-occurrence count."""
+    if seen_before >= 1:
+        tensor[:, :, V3_EXTRA_CHANNELS['repetition_1']] = 1.0
+    if seen_before >= 2:
+        tensor[:, :, V3_EXTRA_CHANNELS['repetition_2']] = 1.0
+    return tensor
+
+
+def move_to_policy_index_v3(move: chess.Move, flip: bool = False) -> int:
+    """Encode a move as (perspective from-square) x (move-type plane)."""
+    from_sq = flip_square(move.from_square) if flip else move.from_square
+    to_sq = flip_square(move.to_square) if flip else move.to_square
+    fr, fc = divmod(from_sq, 8)
+    tr, tc = divmod(to_sq, 8)
+    dr, dc = tr - fr, tc - fc
+
+    if move.promotion is not None:
+        if dr != 1 or dc not in (-1, 0, 1):
+            raise ValueError(f"Unencodable promotion geometry: {move}")
+        try:
+            piece_idx = _PROMO_PIECE_TO_INDEX[move.promotion]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported promotion: {move.promotion}") from exc
+        plane = _PROMO_PLANE_BASE + (dc + 1) * 4 + piece_idx
+    elif (dr, dc) in _KNIGHT_OFFSET_TO_INDEX:
+        plane = _KNIGHT_PLANE_BASE + _KNIGHT_OFFSET_TO_INDEX[(dr, dc)]
+    else:
+        distance = max(abs(dr), abs(dc))
+        if distance == 0 or (dr != 0 and dc != 0 and abs(dr) != abs(dc)):
+            raise ValueError(f"Unencodable move geometry: {move}")
+        direction = (dr // distance if dr else 0, dc // distance if dc else 0)
+        plane = _QUEEN_DIR_TO_INDEX[direction] * 7 + (distance - 1)
+
+    return from_sq * NUM_MOVE_PLANES + plane
+
+
+def policy_index_to_move_v3(index: int, flip: bool = False) -> chess.Move:
+    """Decode a v3 policy class back to a chess.Move (context-free)."""
+    if not 0 <= index < MOVE_VOCAB_SIZE_V3:
+        raise ValueError(f"v3 policy index out of range: {index}")
+    from_sq, plane = divmod(index, NUM_MOVE_PLANES)
+    fr, fc = divmod(from_sq, 8)
+    promotion = None
+    if plane >= _PROMO_PLANE_BASE:
+        offset = plane - _PROMO_PLANE_BASE
+        dc, piece_idx = divmod(offset, 4)
+        dr, dc = 1, dc - 1
+        promotion = _PROMO_PIECES_V3[piece_idx]
+    elif plane >= _KNIGHT_PLANE_BASE:
+        dr, dc = _KNIGHT_OFFSETS[plane - _KNIGHT_PLANE_BASE]
+    else:
+        direction, dist_idx = divmod(plane, 7)
+        dr = _QUEEN_DIRS[direction][0] * (dist_idx + 1)
+        dc = _QUEEN_DIRS[direction][1] * (dist_idx + 1)
+    tr, tc = fr + dr, fc + dc
+    if not (0 <= tr < 8 and 0 <= tc < 8):
+        raise ValueError(f"v3 policy index decodes off-board: {index}")
+    to_sq = tr * 8 + tc
+    if flip:
+        from_sq = flip_square(from_sq)
+        to_sq = flip_square(to_sq)
+    return chess.Move(from_sq, to_sq, promotion=promotion)
+
+
+def legal_policy_indices_v3(board: chess.Board, flip: bool = False):
+    return np.array(
+        [move_to_policy_index_v3(move, flip=flip) for move in board.legal_moves],
+        dtype=np.int32,
+    )
+
+
+def get_encoding_spec(version: str):
+    """Everything encoding-dependent, keyed by board-encoding name."""
+    if version == BOARD_ENCODING_VERSION:
+        return {
+            'board_channels': BOARD_CHANNELS,
+            'move_vocab_size': MOVE_VOCAB_SIZE,
+            'move_to_index': move_to_policy_index,
+            'index_to_move': policy_index_to_move,
+            'legal_indices': legal_policy_indices,
+            'uses_move_history': True,
+        }
+    if version == BOARD_ENCODING_VERSION_V3:
+        return {
+            'board_channels': BOARD_CHANNELS_V3,
+            'move_vocab_size': MOVE_VOCAB_SIZE_V3,
+            'move_to_index': move_to_policy_index_v3,
+            'index_to_move': policy_index_to_move_v3,
+            'legal_indices': legal_policy_indices_v3,
+            'uses_move_history': False,
+        }
+    raise ValueError(f"Unknown board encoding: {version!r}")
+
+
 def move_to_vector(move, flip: bool = False):
     """Encode a chess.Move as a 132-dim float vector."""
     vector = np.zeros(132, dtype=np.float32)
@@ -242,7 +395,11 @@ def move_sequence_to_vector(move_sequence, max_length=10, flip: bool = False):
 
 class ChunkDataset(torch.utils.data.IterableDataset):
     """Streams .npz chunk files sequentially — no random-access disk thrashing."""
-    def __init__(self, chunk_dir, shuffle=True):
+    def __init__(self, chunk_dir, shuffle=True,
+                 expected_encoding=BOARD_ENCODING_VERSION):
+        self.expected_encoding = expected_encoding
+        self.expected_channels = get_encoding_spec(
+            expected_encoding)['board_channels']
         self.chunk_dirs = [
             path for path in str(chunk_dir).split(os.pathsep) if path
         ]
@@ -281,14 +438,14 @@ class ChunkDataset(torch.utils.data.IterableDataset):
                     str(data['board_encoding'].item())
                     if 'board_encoding' in data else None
                 )
-                if board_encoding != BOARD_ENCODING_VERSION:
+                if board_encoding != self.expected_encoding:
                     raise ValueError(
                         f"{path} uses board encoding {board_encoding!r}, but "
-                        f"this model expects {BOARD_ENCODING_VERSION!r}. "
+                        f"this model expects {self.expected_encoding!r}. "
                         "Re-run preprocess.py with the current code."
                     )
                 boards  = data['boards']
-                moves   = data['moves']
+                moves   = data['moves'] if 'moves' in data else None
                 move_idx = data['move_idx'] if 'move_idx' in data else None
                 legal_move_indices = (
                     data['legal_move_indices'] if 'legal_move_indices' in data
@@ -305,11 +462,11 @@ class ChunkDataset(torch.utils.data.IterableDataset):
                     else None
                 )
 
-            if boards.shape[-1] != BOARD_CHANNELS:
+            if boards.shape[-1] != self.expected_channels:
                 raise ValueError(
                     f"{path} has {boards.shape[-1]} board channels, but this "
-                    f"model expects {BOARD_CHANNELS}. Re-run preprocess.py "
-                    "after architecture changes."
+                    f"model expects {self.expected_channels}. Re-run "
+                    "preprocess.py after architecture changes."
                 )
             if move_idx is None or legal_move_indices is None or legal_move_offsets is None:
                 raise ValueError(
@@ -332,7 +489,7 @@ class ChunkDataset(torch.utils.data.IterableDataset):
                 )
                 yield (
                     boards[i],
-                    moves[i],
+                    moves[i] if moves is not None else _NO_MOVE_HISTORY,
                     np.int64(move_idx[i]),
                     legal_move_indices[start:end],
                     np.float32(weight_value),
@@ -340,35 +497,76 @@ class ChunkDataset(torch.utils.data.IterableDataset):
                     np.int8(target_type_value),
                 )
 
-def collate_policy_batch(batch):
-    boards, moves, targets, legal_indices, weights, values, target_types = zip(*batch)
-    targets = torch.as_tensor(targets, dtype=torch.long)
-    legal_mask = torch.zeros((len(batch), MOVE_VOCAB_SIZE), dtype=torch.bool)
-    for row, indices in enumerate(legal_indices):
-        indices = torch.as_tensor(indices, dtype=torch.long)
-        legal_mask[row, indices] = True
-        if not bool(legal_mask[row, targets[row]]):
-            raise ValueError("Training target is missing from its legal move mask.")
-    return (
-        torch.from_numpy(np.stack(boards)).float().permute(0, 3, 1, 2).contiguous(),
-        torch.from_numpy(np.stack(moves)).float(),
-        targets,
-        legal_mask,
-        torch.as_tensor(weights, dtype=torch.float32),
-        torch.as_tensor(values, dtype=torch.float32),
-        torch.as_tensor(target_types, dtype=torch.int8),
-    )
+# Sentinel for chunks without move-history arrays (v3 encoding has no LSTM).
+_NO_MOVE_HISTORY = np.zeros((0,), dtype=np.float32)
+
+
+class PolicyBatchCollator:
+    """Picklable collate_fn — Windows DataLoader workers spawn and must
+    pickle it, so a closure won't do."""
+
+    def __init__(self, move_vocab_size=MOVE_VOCAB_SIZE):
+        self.move_vocab_size = move_vocab_size
+
+    def __call__(self, batch):
+        boards, moves, targets, legal_indices, weights, values, target_types = zip(*batch)
+        targets = torch.as_tensor(targets, dtype=torch.long)
+        legal_mask = torch.zeros(
+            (len(batch), self.move_vocab_size), dtype=torch.bool
+        )
+        for row, indices in enumerate(legal_indices):
+            indices = torch.as_tensor(
+                np.asarray(indices, dtype=np.int64), dtype=torch.long
+            )
+            legal_mask[row, indices] = True
+            if not bool(legal_mask[row, targets[row]]):
+                raise ValueError("Training target is missing from its legal move mask.")
+        if moves[0].size == 0:
+            moves_tensor = torch.zeros((len(batch), 0), dtype=torch.float32)
+        else:
+            moves_tensor = torch.from_numpy(np.stack(moves)).float()
+        return (
+            torch.from_numpy(np.stack(boards)).float().permute(0, 3, 1, 2).contiguous(),
+            moves_tensor,
+            targets,
+            legal_mask,
+            torch.as_tensor(weights, dtype=torch.float32),
+            torch.as_tensor(values, dtype=torch.float32),
+            torch.as_tensor(target_types, dtype=torch.int8),
+        )
+
+
+def make_collate_policy_batch(move_vocab_size=MOVE_VOCAB_SIZE):
+    return PolicyBatchCollator(move_vocab_size)
+
+
+collate_policy_batch = make_collate_policy_batch()
 
 def mask_illegal_logits(policy_logits, legal_mask):
     """Mask illegal moves with a value that is safe for fp32 and fp16."""
     mask_value = torch.finfo(policy_logits.dtype).min
     return policy_logits.masked_fill(~legal_mask, mask_value)
 
-def policy_loss_for_targets(masked_logits, move_idx, target_type):
-    """Cross-entropy for positives, unlikelihood for known bad moves."""
+def policy_loss_for_targets(masked_logits, move_idx, target_type,
+                            legal_mask=None, label_smoothing=0.0):
+    """Cross-entropy for positives, unlikelihood for known bad moves.
+
+    label_smoothing > 0 mixes the one-hot positive target with a uniform
+    distribution over the legal moves (requires legal_mask).
+    """
     log_probs = torch.log_softmax(masked_logits.float(), dim=1)
     target_log_prob = log_probs.gather(1, move_idx.unsqueeze(1)).squeeze(1)
     positive_loss = -target_log_prob
+    if label_smoothing > 0.0 and legal_mask is not None:
+        legal_log_probs = torch.where(
+            legal_mask, log_probs, torch.zeros_like(log_probs)
+        )
+        legal_counts = legal_mask.sum(dim=1).clamp_min(1).float()
+        uniform_loss = -legal_log_probs.sum(dim=1) / legal_counts
+        positive_loss = (
+            (1.0 - label_smoothing) * positive_loss +
+            label_smoothing * uniform_loss
+        )
     bad_move_prob = target_log_prob.exp().clamp(max=1.0 - 1e-6)
     negative_loss = -torch.log1p(-bad_move_prob) * NEGATIVE_POLICY_LOSS_WEIGHT
     return torch.where(target_type < 0, negative_loss, positive_loss)
@@ -401,21 +599,26 @@ class ResidualBlock(nn.Module):
 
 class ChessModel(nn.Module):
     """Perspective ResNet + LSTM with separate legal policy and value heads."""
-    def __init__(self):
+    def __init__(self, filters=RESIDUAL_FILTERS, blocks=RESIDUAL_BLOCKS):
         super().__init__()
+        self.arch_version = 'v2'
+        self.encoding_version = BOARD_ENCODING_VERSION
+        self.encoding_spec = get_encoding_spec(self.encoding_version)
+        self.filters = filters
+        self.blocks = blocks
         self.cnn = nn.Sequential(
             nn.Conv2d(
-                BOARD_CHANNELS, RESIDUAL_FILTERS, kernel_size=3,
+                BOARD_CHANNELS, filters, kernel_size=3,
                 padding=1, bias=False,
             ),
-            nn.BatchNorm2d(RESIDUAL_FILTERS),
+            nn.BatchNorm2d(filters),
             nn.ReLU(inplace=True),
-            *[ResidualBlock(RESIDUAL_FILTERS) for _ in range(RESIDUAL_BLOCKS)],
+            *[ResidualBlock(filters) for _ in range(blocks)],
             nn.Flatten(),
         )
         self.lstm = nn.LSTM(input_size=132, hidden_size=64, batch_first=True)
         self.fc = nn.Sequential(
-            nn.Linear(RESIDUAL_FILTERS * 8 * 8 + 64, 256),
+            nn.Linear(filters * 8 * 8 + 64, 256),
             nn.ReLU(),
             nn.Linear(256, 128),  # Dropout removed — hurts chess CNN performance
             nn.ReLU(),
@@ -435,6 +638,186 @@ class ChessModel(nn.Module):
         combined = torch.cat([cnn_out, lstm_out], dim=1)
         z = self.fc(combined)
         return self.policy_head(z), self.value_head(z).squeeze(1)
+
+
+class ChessModelV3(nn.Module):
+    """Perspective ResNet with fully-convolutional policy head (v3 encoding).
+
+    Differences from ChessModel (v2):
+      - 20 input channels: + halfmove clock and two repetition planes.
+      - No LSTM/move history: the history signal measured ~1% top-1 and
+        caused a train/serve skew (the web backend has no move stack).
+      - Policy is spatial: a 1x1 conv produces 76 move-type planes per
+        square; logit index = from_square * 76 + plane. This removes the
+        128-dim FC bottleneck in front of a 20k-class softmax that limited
+        v2's middlegame generalization.
+      - Value head reads the conv features directly.
+    """
+
+    def __init__(self, filters=RESIDUAL_FILTERS, blocks=RESIDUAL_BLOCKS,
+                 head_dropout=HEAD_DROPOUT):
+        super().__init__()
+        self.arch_version = 'v3'
+        self.encoding_version = BOARD_ENCODING_VERSION_V3
+        self.encoding_spec = get_encoding_spec(self.encoding_version)
+        self.filters = filters
+        self.blocks = blocks
+        self.cnn = nn.Sequential(
+            nn.Conv2d(
+                BOARD_CHANNELS_V3, filters, kernel_size=3,
+                padding=1, bias=False,
+            ),
+            nn.BatchNorm2d(filters),
+            nn.ReLU(inplace=True),
+            *[ResidualBlock(filters) for _ in range(blocks)],
+        )
+        self.policy_head = nn.Sequential(
+            nn.Conv2d(filters, filters, kernel_size=3,
+                      padding=1, bias=False),
+            nn.BatchNorm2d(filters),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(head_dropout),
+            nn.Conv2d(filters, NUM_MOVE_PLANES, kernel_size=1),
+        )
+        self.value_head = nn.Sequential(
+            nn.Conv2d(filters, 8, kernel_size=1, bias=False),
+            nn.BatchNorm2d(8),
+            nn.ReLU(inplace=True),
+            nn.Flatten(),
+            nn.Linear(8 * 8 * 8, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(head_dropout),
+            nn.Linear(128, 1),
+            nn.Tanh(),
+        )
+
+    def forward(self, board, moves=None):
+        features = self.cnn(board)
+        policy_planes = self.policy_head(features)
+        # (B, 76, 8, 8) -> (B, 8, 8, 76) -> flat so that
+        # index = (row * 8 + col) * 76 + plane = from_square * 76 + plane.
+        policy = policy_planes.permute(0, 2, 3, 1).reshape(
+            policy_planes.size(0), MOVE_VOCAB_SIZE_V3
+        )
+        value = self.value_head(features).squeeze(1)
+        return policy, value
+
+
+class SqueezeExcitation(nn.Module):
+    """Channel attention: global-average-pool -> bottleneck MLP -> sigmoid scale."""
+
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        self.fc1 = nn.Linear(channels, channels // reduction)
+        self.fc2 = nn.Linear(channels // reduction, channels)
+
+    def forward(self, x):
+        scale = x.mean(dim=(2, 3))
+        scale = torch.relu(self.fc1(scale))
+        scale = torch.sigmoid(self.fc2(scale))
+        return x * scale[:, :, None, None]
+
+
+class ResidualSEBlock(nn.Module):
+    """ResidualBlock plus squeeze-and-excitation before the skip connection."""
+
+    def __init__(self, channels, se_reduction=8):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1,
+                               bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1,
+                               bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.se = SqueezeExcitation(channels, reduction=se_reduction)
+
+    def forward(self, x):
+        residual = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)
+        return self.relu(out + residual)
+
+
+class ChessModelV4(nn.Module):
+    """SE-ResNet for engine distillation (docs/ROADMAP_2500.md WS2).
+
+    Same v3 board encoding and head layout as ChessModelV3 — only the tower
+    changes (squeeze-excitation blocks, configurable width/depth from
+    constructor args instead of env so the checkpoint metadata alone can
+    rebuild the exact architecture at serving time).
+    """
+
+    def __init__(self, filters=256, blocks=12, head_dropout=HEAD_DROPOUT):
+        super().__init__()
+        self.arch_version = 'v4'
+        self.encoding_version = BOARD_ENCODING_VERSION_V3
+        self.encoding_spec = get_encoding_spec(self.encoding_version)
+        self.filters = filters
+        self.blocks = blocks
+        # The Lichess evaluations dataset contains four-field FENs, so neither
+        # the halfmove clock nor repetition history exists in the v4 training
+        # corpus. Keep those three v3 auxiliary planes at zero at the model
+        # boundary. Without this mask, live six-field FENs activate input
+        # weights that received no training signal and create a train/serve
+        # skew in the already-trained v4 checkpoint.
+        input_plane_mask = torch.ones(1, BOARD_CHANNELS_V3, 1, 1)
+        input_plane_mask[:, BOARD_CHANNELS:, :, :] = 0.0
+        self.register_buffer(
+            '_input_plane_mask', input_plane_mask, persistent=False
+        )
+        self.cnn = nn.Sequential(
+            nn.Conv2d(BOARD_CHANNELS_V3, filters, kernel_size=3,
+                      padding=1, bias=False),
+            nn.BatchNorm2d(filters),
+            nn.ReLU(inplace=True),
+            *[ResidualSEBlock(filters) for _ in range(blocks)],
+        )
+        self.policy_head = nn.Sequential(
+            nn.Conv2d(filters, filters, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(filters),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(head_dropout),
+            nn.Conv2d(filters, NUM_MOVE_PLANES, kernel_size=1),
+        )
+        self.value_head = nn.Sequential(
+            nn.Conv2d(filters, 8, kernel_size=1, bias=False),
+            nn.BatchNorm2d(8),
+            nn.ReLU(inplace=True),
+            nn.Flatten(),
+            nn.Linear(8 * 8 * 8, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(head_dropout),
+            nn.Linear(128, 1),
+            nn.Tanh(),
+        )
+
+    def forward(self, board, moves=None):
+        features = self.cnn(board * self._input_plane_mask)
+        policy_planes = self.policy_head(features)
+        policy = policy_planes.permute(0, 2, 3, 1).reshape(
+            policy_planes.size(0), MOVE_VOCAB_SIZE_V3
+        )
+        value = self.value_head(features).squeeze(1)
+        return policy, value
+
+
+def build_model(arch_version: str):
+    if arch_version == 'v2':
+        return ChessModel(
+            filters=RESIDUAL_FILTERS, blocks=RESIDUAL_BLOCKS
+        ), BOARD_ENCODING_VERSION
+    if arch_version == 'v3':
+        return ChessModelV3(
+            filters=RESIDUAL_FILTERS, blocks=RESIDUAL_BLOCKS
+        ), BOARD_ENCODING_VERSION_V3
+    if arch_version == 'v4':
+        # Preserve v4's intentionally larger default. Distillation passes
+        # explicit dimensions, while the generic v2/v3 env knobs remain
+        # backward compatible with their historical architectures.
+        return ChessModelV4(), BOARD_ENCODING_VERSION_V3
+    raise ValueError(f"Unknown ARCH_VERSION: {arch_version!r}")
 
 # Training
 
@@ -461,7 +844,8 @@ def train_one_epoch(model, loader, optimizer, scaler, value_criterion,
             policy_logits, value_pred = model(boards, moves)
             masked_logits = mask_illegal_logits(policy_logits, legal_mask)
             policy_loss_per_sample = policy_loss_for_targets(
-                masked_logits, move_idx, target_type
+                masked_logits, move_idx, target_type,
+                legal_mask=legal_mask, label_smoothing=LABEL_SMOOTHING,
             )
             value_loss_per_sample = value_criterion(
                 value_pred.float(), value_target.float()
@@ -537,7 +921,8 @@ def evaluate(model, loader, value_criterion, device, max_batches=None):
             policy_logits, value_pred = model(boards, moves)
             masked_logits = mask_illegal_logits(policy_logits, legal_mask)
             policy_loss_per_sample = policy_loss_for_targets(
-                masked_logits, move_idx, target_type
+                masked_logits, move_idx, target_type,
+                legal_mask=legal_mask, label_smoothing=LABEL_SMOOTHING,
             )
             value_loss_per_sample = value_criterion(
                 value_pred.float(), value_target.float()
@@ -604,21 +989,40 @@ def main():
     assert_training_device()
     print_device_info()
 
-    model_dir = os.path.dirname(MODEL_PATH)
+    # The training output path follows the architecture unless MODEL_PATH is
+    # explicit, so a v2 run never overwrites the v3 checkpoint and vice versa.
+    model_path = MODEL_PATH
+    if ARCH_VERSION == 'v2' and not os.environ.get('MODEL_PATH'):
+        model_path = MODEL_PATH_V2
+    _, encoding_version = build_model(ARCH_VERSION)  # validate ARCH_VERSION early
+
+    model_dir = os.path.dirname(model_path)
     if model_dir:
         os.makedirs(model_dir, exist_ok=True)
 
+    # Default chunk dirs follow the architecture so v2 data is never mixed in.
+    train_dir, val_dir = TRAIN_DIR, VAL_DIR
+    if ARCH_VERSION == 'v3':
+        if not (os.environ.get('TRAIN_DIRS') or os.environ.get('TRAIN_DIR')):
+            train_dir = 'data/train_chunks_v3'
+        if not (os.environ.get('VAL_DIRS') or os.environ.get('VAL_DIR')):
+            val_dir = 'data/val_chunks_v3'
+
     print("Loading training dataset...", flush=True)
-    train_ds = ChunkDataset(TRAIN_DIR, shuffle=True)
+    train_ds = ChunkDataset(train_dir, shuffle=True,
+                            expected_encoding=encoding_version)
     print("Loading validation dataset...", flush=True)
-    val_ds   = ChunkDataset(VAL_DIR,   shuffle=False)
+    val_ds   = ChunkDataset(val_dir,   shuffle=False,
+                            expected_encoding=encoding_version)
+    spec = get_encoding_spec(encoding_version)
+    collate_fn = make_collate_policy_batch(spec['move_vocab_size'])
 
     train_loader_kwargs = {
         'batch_size': BATCH_SIZE,
         'num_workers': TRAIN_NUM_WORKERS,
         'pin_memory': DEVICE.type == 'cuda',
         'persistent_workers': TRAIN_NUM_WORKERS > 0,
-        'collate_fn': collate_policy_batch,
+        'collate_fn': collate_fn,
     }
     if TRAIN_NUM_WORKERS > 0:
         train_loader_kwargs['prefetch_factor'] = PREFETCH_FACTOR
@@ -629,15 +1033,23 @@ def main():
         'num_workers': VAL_NUM_WORKERS,
         'pin_memory': DEVICE.type == 'cuda',
         'persistent_workers': VAL_NUM_WORKERS > 0,
-        'collate_fn': collate_policy_batch,
+        'collate_fn': collate_fn,
     }
     if VAL_NUM_WORKERS > 0:
         val_loader_kwargs['prefetch_factor'] = PREFETCH_FACTOR
     val_loader = DataLoader(val_ds, **val_loader_kwargs)
 
-    model     = ChessModel().to(DEVICE)
+    model, _ = build_model(ARCH_VERSION)
+    model = model.to(DEVICE)
     if INIT_MODEL_PATH:
         checkpoint = torch.load(INIT_MODEL_PATH, map_location=DEVICE)
+        init_encoding = checkpoint.get('board_encoding')
+        if init_encoding is not None and init_encoding != encoding_version:
+            raise ValueError(
+                f"INIT_MODEL_PATH checkpoint uses encoding {init_encoding!r} "
+                f"but ARCH_VERSION={ARCH_VERSION!r} expects "
+                f"{encoding_version!r}."
+            )
         load_result, skipped_shape_keys = load_compatible_state_dict(
             model, checkpoint
         )
@@ -649,7 +1061,9 @@ def main():
         if skipped_shape_keys:
             print(f"  Skipped incompatible tensors: {skipped_shape_keys}")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
+    )
     value_criterion = nn.MSELoss(reduction='none')
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=3
@@ -657,7 +1071,10 @@ def main():
     scaler = torch.amp.GradScaler('cuda', enabled=DEVICE.type == 'cuda')
 
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
-    print(f"Board encoding: {BOARD_ENCODING_VERSION}", flush=True)
+    print(f"Architecture: {ARCH_VERSION}  |  Board encoding: {encoding_version}", flush=True)
+    print(f"Checkpoint output: {model_path}", flush=True)
+    print(f"Weight decay: {WEIGHT_DECAY}  |  Label smoothing: {LABEL_SMOOTHING}  "
+          f"|  Head dropout: {HEAD_DROPOUT}", flush=True)
     print(f"Residual tower: {RESIDUAL_BLOCKS} blocks x {RESIDUAL_FILTERS} filters", flush=True)
     print(f"Batch size : {BATCH_SIZE}  |  Max epochs : {EPOCHS}", flush=True)
     print(f"Train workers: {TRAIN_NUM_WORKERS}  |  Val workers: {VAL_NUM_WORKERS}", flush=True)
@@ -713,12 +1130,16 @@ def main():
                     'val_policy_loss':      val_metrics['policy_loss'],
                     'val_value_loss':       val_metrics['value_loss'],
                     'val_value_mae':        val_metrics['value_mae'],
-                    'board_encoding':        BOARD_ENCODING_VERSION,
+                    'board_encoding':        encoding_version,
+                    'arch_version':          ARCH_VERSION,
                     'residual_filters':      RESIDUAL_FILTERS,
                     'residual_blocks':       RESIDUAL_BLOCKS,
                     'value_loss_weight':    VALUE_LOSS_WEIGHT,
                     'negative_policy_loss_weight': NEGATIVE_POLICY_LOSS_WEIGHT,
-                }, MODEL_PATH)
+                    'weight_decay':          WEIGHT_DECAY,
+                    'label_smoothing':       LABEL_SMOOTHING,
+                    'head_dropout':          HEAD_DROPOUT,
+                }, model_path)
                 print(f"  Saved best model (val_loss={best_val_loss:.4f})", flush=True)
             else:
                 print(f"  SAVE_MODEL=0, skipped checkpoint "
@@ -731,7 +1152,7 @@ def main():
                 break
 
     if SAVE_MODEL:
-        print(f"\nTraining complete. Best model saved to: {MODEL_PATH}", flush=True)
+        print(f"\nTraining complete. Best model saved to: {model_path}", flush=True)
     else:
         print("\nTraining complete. SAVE_MODEL=0, no checkpoint written.", flush=True)
 

@@ -4,6 +4,7 @@ data/
 extractions/
 model/
 analysis_games/
+evaluation/results/
 __pycache__/
 *.py[cod]
 *.pyo

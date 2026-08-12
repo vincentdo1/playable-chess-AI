@@ -1,7 +1,7 @@
 import unittest
 
 import chess
-import preprocess
+from training import preprocess
 from training.preprocess import (
     CP_LOSS_BUCKET_BLUNDER,
     CP_LOSS_BUCKET_CRITICAL,

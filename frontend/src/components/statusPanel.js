@@ -6,7 +6,7 @@ const playerNames = {
   alphabeta: 'Alphabeta AI',
   stockfish: 'Stockfish',
   random: 'Random',
-  magnus: 'Magnus Carlsen',
+  magnus: 'Neural Network',
 };
 
 export class StatusPanel {

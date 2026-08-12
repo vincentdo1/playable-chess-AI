@@ -86,7 +86,7 @@ export class PlayerControls {
       const option = document.getElementById(`mo-${color}`);
       if (!option) return;
       option.disabled = false;
-      option.textContent = 'Magnus Carlsen';
+      option.textContent = 'Neural Network';
     });
   }
 
