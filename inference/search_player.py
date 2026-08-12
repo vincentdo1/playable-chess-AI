@@ -23,7 +23,8 @@ import numpy as np
 import torch
 
 from neural_network import (
-    BOARD_ENCODING_VERSION, ChessModel, get_encoding_spec
+    BOARD_ENCODING_VERSION, BOARD_ENCODING_VERSION_V3, ChessModel,
+    get_encoding_spec,
 )
 from load_model import _model_encoding, _move_batch_tensor, _position_arrays
 
@@ -59,7 +60,7 @@ class SearchStats:
 
 
 class NNEvaluator:
-    """Single point of contact with the network; caches by Zobrist hash.
+    """Single point of contact with the network; caches by encoded position.
 
     Returns (policy_logits over MOVE_VOCAB_SIZE classes, value in [-1, 1] from side-to-move).
     Positions repeat constantly in alpha-beta (move ordering revisits the root,
@@ -72,11 +73,29 @@ class NNEvaluator:
         self.encoding_version = _model_encoding(model)
         self.move_to_index = get_encoding_spec(
             self.encoding_version)['move_to_index']
-        self._cache: dict[int, tuple[np.ndarray, float]] = {}
+        self._cache: dict[tuple, tuple[np.ndarray, float]] = {}
         self.stats = stats
 
+    def cache_key(self, board: chess.Board) -> tuple:
+        """Include every history-dependent input consumed by the model.
+
+        Polyglot hashes omit the halfmove clock and move history. Reusing only
+        that hash is incorrect for v3's clock/repetition planes and v2's LSTM.
+        """
+        position_hash = chess.polyglot.zobrist_hash(board)
+        if self.encoding_version == BOARD_ENCODING_VERSION_V3:
+            repetition_2 = bool(board.move_stack and board.is_repetition(2))
+            repetition_3 = bool(board.move_stack and board.is_repetition(3))
+            return (
+                position_hash,
+                board.halfmove_clock,
+                repetition_2,
+                repetition_3,
+            )
+        return position_hash, tuple(board.move_stack[-10:])
+
     def evaluate(self, board: chess.Board) -> tuple[np.ndarray, float]:
-        key = chess.polyglot.zobrist_hash(board)
+        key = self.cache_key(board)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
@@ -171,8 +190,11 @@ def _quiescence(
     beta: float,
     ply: int,
     stats: SearchStats,
+    deadline: float | None = None,
 ) -> float:
     """Extend search through captures so the leaf eval lands on a quiet position."""
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError()
     stats.qnodes += 1
 
     terminal = _terminal_score_cp(board, ply)
@@ -203,8 +225,12 @@ def _quiescence(
 
     for move in tactical_moves:
         board.push(move)
-        score = -_quiescence(evaluator, board, -beta, -alpha, ply + 1, stats)
-        board.pop()
+        try:
+            score = -_quiescence(
+                evaluator, board, -beta, -alpha, ply + 1, stats, deadline,
+            )
+        finally:
+            board.pop()
         if score >= beta:
             return beta
         if score > alpha:
@@ -232,7 +258,7 @@ def _negamax(
     if terminal is not None:
         return terminal
 
-    key = chess.polyglot.zobrist_hash(board)
+    key = evaluator.cache_key(board)
     hash_move: chess.Move | None = None
     tt_entry = tt.get(key)
     if tt_entry is not None:
@@ -248,7 +274,9 @@ def _negamax(
                 return tt_score
 
     if depth <= 0:
-        return _quiescence(evaluator, board, alpha, beta, ply, stats)
+        return _quiescence(
+            evaluator, board, alpha, beta, ply, stats, deadline,
+        )
 
     original_alpha = alpha
     best_score = -MATE_SCORE
@@ -256,10 +284,13 @@ def _negamax(
 
     for move in _ordered_moves(evaluator, board, hash_move):
         board.push(move)
-        score = -_negamax(
-            evaluator, board, depth - 1, -beta, -alpha, ply + 1, tt, stats, deadline,
-        )
-        board.pop()
+        try:
+            score = -_negamax(
+                evaluator, board, depth - 1, -beta, -alpha, ply + 1,
+                tt, stats, deadline,
+            )
+        finally:
+            board.pop()
 
         if score > best_score:
             best_score = score
@@ -310,7 +341,7 @@ def search_best_move(
 
     for depth in range(1, max_depth + 1):
         try:
-            root_key = chess.polyglot.zobrist_hash(board)
+            root_key = evaluator.cache_key(board)
             root_tt = tt.get(root_key)
             hash_move = root_tt[3] if root_tt is not None else None
 
@@ -320,10 +351,13 @@ def search_best_move(
 
             for move in _ordered_moves(evaluator, board, hash_move):
                 board.push(move)
-                score = -_negamax(
-                    evaluator, board, depth - 1, -beta, -alpha, 1, tt, stats, deadline,
-                )
-                board.pop()
+                try:
+                    score = -_negamax(
+                        evaluator, board, depth - 1, -beta, -alpha, 1,
+                        tt, stats, deadline,
+                    )
+                finally:
+                    board.pop()
                 if score > iter_best_score:
                     iter_best_score = score
                     iter_best_move = move

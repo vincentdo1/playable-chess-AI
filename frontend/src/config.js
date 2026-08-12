@@ -14,6 +14,5 @@ export const config = {
     temperature: 0.0,
     valueWeight: 2.0,
     valueCandidates: 0,
-    mctsSimulations: 128,
   },
 };
