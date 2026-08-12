@@ -69,8 +69,38 @@ def _percentile(values: list[float], quantile: float) -> float | None:
     return float(np.quantile(np.asarray(values, dtype=np.float64), quantile))
 
 
+# Two-sided 95% Student-t critical values. Evaluation runs have tens of
+# independent units, where the normal 1.96 understates the interval (t at
+# 15 df is 2.131) and would let the predeclared lower-bound gate pass on
+# evidence a real 95% interval rejects.
+_T_CRITICAL_975 = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+    8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160,
+    14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093,
+    20: 2.086, 21: 2.080, 22: 2.074, 23: 2.069, 24: 2.064, 25: 2.060,
+    26: 2.056, 27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042,
+}
+_T_CRITICAL_975_ANCHORS = ((120, 1.980), (60, 2.000), (40, 2.021))
+
+
+def _t_critical_975(df: int) -> float:
+    """Critical value for a two-sided 95% t-interval, rounding conservatively.
+
+    Between table anchors the smaller-df (larger) value is used, so the
+    resulting interval is never narrower than the exact t-interval.
+    """
+    if df < 1:
+        raise ValueError('t interval needs at least 1 degree of freedom')
+    if df in _T_CRITICAL_975:
+        return _T_CRITICAL_975[df]
+    for anchor_df, critical in _T_CRITICAL_975_ANCHORS:
+        if df >= anchor_df:
+            return critical
+    return _T_CRITICAL_975[30]
+
+
 def _score_ci(scores: list[float]) -> tuple[float, float]:
-    """Normal 95% interval over independent evaluation units.
+    """Student-t 95% interval over independent evaluation units.
 
     For paired mode each unit is the mean of the two color-reversed games for
     an opening, so color-correlated games are not counted as independent.
@@ -80,7 +110,8 @@ def _score_ci(scores: list[float]) -> tuple[float, float]:
         return value, value
     mean = statistics.fmean(scores)
     se = statistics.stdev(scores) / math.sqrt(len(scores))
-    return max(0.0, mean - 1.96 * se), min(1.0, mean + 1.96 * se)
+    critical = _t_critical_975(len(scores) - 1)
+    return max(0.0, mean - critical * se), min(1.0, mean + critical * se)
 
 
 def _read_openings(path: str | None, no_openings: bool) -> list[tuple[str, str]]:
@@ -404,12 +435,17 @@ def main() -> None:
     print(f'Artifacts: {json_path} and {pgn_path}')
 
     failures = []
-    if (args.require_score_lower_bound is not None and
-            score_low < args.require_score_lower_bound):
-        failures.append(
-            f'score lower bound {score_low:.3f} < '
-            f'{args.require_score_lower_bound:.3f}'
-        )
+    if args.require_score_lower_bound is not None:
+        if len(paired_units) < 2:
+            failures.append(
+                f'score lower bound requires at least 2 independent units, '
+                f'got {len(paired_units)}'
+            )
+        elif score_low < args.require_score_lower_bound:
+            failures.append(
+                f'score lower bound {score_low:.3f} < '
+                f'{args.require_score_lower_bound:.3f}'
+            )
     if (args.require_p95_seconds is not None and
             (latency['p95'] is None or latency['p95'] > args.require_p95_seconds)):
         failures.append(
