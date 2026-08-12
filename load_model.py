@@ -10,8 +10,9 @@ import chess
 
 from neural_network import (
     BOARD_ENCODING_VERSION, BOARD_ENCODING_VERSION_V3, ChessModel,
-    ChessModelV3, ChessModelV4, board_to_tensor_v3, fen_to_tensor,
-    get_encoding_spec, move_sequence_to_vector, MODEL_PATH, DEVICE
+    ChessModelV3, ChessModelV4, RESIDUAL_BLOCKS, RESIDUAL_FILTERS,
+    board_to_tensor_v3, fen_to_tensor, get_encoding_spec,
+    move_sequence_to_vector, MODEL_PATH, DEVICE
 )
 
 DEFAULT_VALUE_WEIGHT = float(os.environ.get('MAGNUS_VALUE_WEIGHT', '2.0'))
@@ -151,12 +152,17 @@ def load_trained_model(path: str = MODEL_PATH) -> ChessModel:
             f'{expected_encoding!r}, got {checkpoint_encoding!r}.'
         )
 
+    # Pre-metadata v2/v3 checkpoints never recorded their dimensions; those
+    # were whatever the RESIDUAL_FILTERS/RESIDUAL_BLOCKS env knobs said at
+    # training time, so the same knobs (not hardcoded 128x8) are the fallback.
     filters = _checkpoint_dimension(
-        checkpoint, 'residual_filters', 256 if arch_version == 'v4' else 128,
+        checkpoint, 'residual_filters',
+        256 if arch_version == 'v4' else RESIDUAL_FILTERS,
         maximum=1024,
     )
     blocks = _checkpoint_dimension(
-        checkpoint, 'residual_blocks', 12 if arch_version == 'v4' else 8,
+        checkpoint, 'residual_blocks',
+        12 if arch_version == 'v4' else RESIDUAL_BLOCKS,
         maximum=128,
     )
     if arch_version == 'v4':

@@ -13,6 +13,7 @@ from load_model import _validate_hf_revision, load_trained_model
 from neural_network import (
     BOARD_ENCODING_VERSION,
     BOARD_ENCODING_VERSION_V3,
+    ChessModelV3,
     ChessModelV4,
 )
 
@@ -76,6 +77,26 @@ def test_unexpected_state_key_fails_closed():
             raise AssertionError('unexpected state tensor was accepted')
 
 
+def test_dimensionless_legacy_checkpoint_uses_env_knob_defaults():
+    # Pre-metadata v2/v3 checkpoints carry no residual_filters/blocks; their
+    # dimensions were set by the RESIDUAL_FILTERS/RESIDUAL_BLOCKS env knobs at
+    # training time, so loading must fall back to those knobs, not to a
+    # hardcoded 128x8.
+    model = ChessModelV3(filters=16, blocks=2)
+    payload = {
+        'model_state_dict': model.state_dict(),
+        'board_encoding': BOARD_ENCODING_VERSION_V3,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'legacy-v3.pt')
+        torch.save(payload, path)
+        with mock.patch.multiple(
+            'load_model', RESIDUAL_FILTERS=16, RESIDUAL_BLOCKS=2
+        ):
+            loaded = load_trained_model(path)
+    assert loaded.filters == 16 and loaded.blocks == 2
+
+
 def test_hf_download_requires_immutable_revision():
     with tempfile.TemporaryDirectory() as tmp:
         missing = os.path.join(tmp, 'missing.pt')
@@ -108,6 +129,7 @@ if __name__ == '__main__':
     test_architecture_encoding_mismatch_fails_closed()
     test_checksum_mismatch_fails_closed()
     test_unexpected_state_key_fails_closed()
+    test_dimensionless_legacy_checkpoint_uses_env_knob_defaults()
     test_hf_download_requires_immutable_revision()
     test_hf_revision_rejects_branch_and_tag_names()
     print('checkpoint contract tests passed')

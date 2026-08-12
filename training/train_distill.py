@@ -402,6 +402,15 @@ def _restore_checkpoint(path, model, optimizer, scaler, data_provenance,
                     'that is not an exact resume'
                 )
 
+    if 'rng_state' not in checkpoint:
+        # The seeded data stream still replays in order, but dropout and any
+        # other consumers of the global RNGs restart from the fresh seed
+        # instead of the exact state at the save point.
+        print(
+            f'WARNING: {path!r} predates RNG-state capture; the resumed run '
+            'is deterministic but not bit-identical to an uninterrupted one.',
+            flush=True,
+        )
     model.load_state_dict(checkpoint['model_state_dict'], strict=True)
     if checkpoint.get('optimizer_class') not in (None, type(optimizer).__name__):
         raise ValueError(
