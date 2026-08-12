@@ -87,6 +87,13 @@ def test_labels_and_range(rows):
 
 
 def test_sign_vs_local_stockfish(rows):
+    if not os.path.exists(STOCKFISH):
+        try:
+            import pytest
+            pytest.skip(f'artifact integration test requires {STOCKFISH}')
+        except ImportError:
+            print(f'  SKIP Stockfish cross-check: {STOCKFISH} not found')
+            return
     engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH)
     stored, measured = [], []
     try:

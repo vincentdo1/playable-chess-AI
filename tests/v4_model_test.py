@@ -36,6 +36,25 @@ def test_forward_shapes():
     print('  v4 forward shapes OK')
 
 
+def test_untrained_auxiliary_planes_are_ignored():
+    """Four-field distillation FENs cannot supervise clock/repetition planes.
+
+    Existing v4 weights must therefore be invariant to channels 17-19 when a
+    live six-field FEN contains a nonzero halfmove clock or repetition state.
+    """
+    torch.manual_seed(7)
+    model = ChessModelV4(filters=16, blocks=1).eval()
+    base = torch.randn(2, BOARD_CHANNELS_V3, 8, 8)
+    changed = base.clone()
+    changed[:, 17:, :, :] = torch.randn_like(changed[:, 17:, :, :]) * 100
+    with torch.no_grad():
+        policy_a, value_a = model(base)
+        policy_b, value_b = model(changed)
+    assert torch.equal(policy_a, policy_b)
+    assert torch.equal(value_a, value_b)
+    print('  v4 ignores unsupervised clock/repetition planes')
+
+
 def test_checkpoint_roundtrip_dispatch():
     from load_model import load_trained_model
 
@@ -132,6 +151,7 @@ def test_tiny_overfit():
 
 if __name__ == '__main__':
     test_forward_shapes()
+    test_untrained_auxiliary_planes_are_ignored()
     test_checkpoint_roundtrip_dispatch()
     test_v3_dispatch_unaffected()
     test_tiny_overfit()

@@ -164,6 +164,13 @@ def test_chunk_dirs():
         grand_rep += dir_rep
         print(f'  {chunk_dir}: {dir_rows} rows OK across {len(picked)} chunks '
               f'({dir_rep} rows carry in-game repetition planes)')
+    if grand_rows == 0:
+        try:
+            import pytest
+            pytest.skip('artifact integration test requires v3 chunk data')
+        except ImportError:
+            print('  SKIP chunk audit: no v3 chunk data')
+            return
     assert grand_rows >= 1500, f'too few rows audited: {grand_rows}'
     print(f'  total {grand_rows} rows: labels legal, decode==played_uci, '
           f'legal sets match FEN recompute, tensors match serving path')
@@ -175,6 +182,13 @@ def test_chunk_dirs():
 def test_collator_permutation_matches_serving():
     import torch
     paths = sorted(glob.glob(os.path.join(CHUNK_DIRS[0], 'chunk_*.npz')))
+    if not paths:
+        try:
+            import pytest
+            pytest.skip('artifact integration test requires v3 chunk data')
+        except ImportError:
+            print('  SKIP collator artifact check: no v3 chunk data')
+            return
     with np.load(paths[0]) as data:
         board = data['boards'][0]
     collated = torch.from_numpy(np.stack([board])).float().permute(0, 3, 1, 2)
@@ -190,6 +204,13 @@ def test_full_chunk_streams_through_dataset():
     any target is missing from its legal mask, so surviving = pass."""
     from torch.utils.data import DataLoader
 
+    if not glob.glob('data/val_chunks_v3/chunk_*.npz'):
+        try:
+            import pytest
+            pytest.skip('artifact integration test requires validation chunks')
+        except ImportError:
+            print('  SKIP dataset stream: no validation chunks')
+            return
     spec = get_encoding_spec(BOARD_ENCODING_VERSION_V3)
     ds = ChunkDataset('data/val_chunks_v3', shuffle=False,
                       expected_encoding=BOARD_ENCODING_VERSION_V3)
