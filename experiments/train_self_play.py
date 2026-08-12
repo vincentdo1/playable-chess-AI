@@ -25,9 +25,14 @@ log-probabilities, matching how the network is used at inference.
 from __future__ import annotations
 
 import argparse
+import copy
 import glob
 import json
 import os
+import platform
+import random
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
@@ -357,7 +362,11 @@ def _gate_match(model, previous_state: dict, config: 'TrainingConfig') -> float:
     temperature for the first 20 plies de-duplicates the games; after that
     both sides play greedily.
     """
-    prev = type(model)().to(DEVICE)
+    # Constructors have architecture-specific defaults (v4 defaults to
+    # 256x12), so type(model)() is not a faithful clone of a custom-width or
+    # custom-depth network. Deep-copy preserves the exact architecture and all
+    # non-persistent inference attributes before swapping in prior weights.
+    prev = copy.deepcopy(model).to(DEVICE)
     prev.load_state_dict(previous_state)
     prev.eval()
     prev.encoding_version = _model_encoding(model)
@@ -390,22 +399,153 @@ def _gate_match(model, previous_state: dict, config: 'TrainingConfig') -> float:
     return score / max(config.gate_games, 1)
 
 
+def _model_architecture(model) -> str:
+    explicit = getattr(model, 'arch_version', None)
+    if explicit:
+        return explicit
+    return {
+        'ChessModel': 'v2',
+        'ChessModelV3': 'v3',
+        'ChessModelV4': 'v4',
+    }.get(type(model).__name__, ARCH_VERSION)
+
+
+def _capture_rng_state() -> dict:
+    numpy_state = np.random.get_state()
+    state = {
+        'python': random.getstate(),
+        'numpy': {
+            'bit_generator': numpy_state[0],
+            'state': torch.from_numpy(numpy_state[1].copy()),
+            'position': int(numpy_state[2]),
+            'has_gauss': int(numpy_state[3]),
+            'cached_gaussian': float(numpy_state[4]),
+        },
+        'torch_cpu': torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state['torch_cuda'] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _runtime_metadata() -> dict:
+    try:
+        git_sha = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        git_sha = None
+    return {
+        'created_at': datetime.now().astimezone().isoformat(),
+        'git_sha': git_sha,
+        'python': sys.version,
+        'platform': platform.platform(),
+        'packages': {
+            'torch': str(torch.__version__),
+            'numpy': np.__version__,
+            'python_chess': chess.__version__,
+        },
+        'device': str(DEVICE),
+    }
+
+
+def _restore_rng_state(state: dict | None) -> None:
+    if not state:
+        return
+    random.setstate(state['python'])
+    numpy_state = state['numpy']
+    np.random.set_state((
+        numpy_state['bit_generator'],
+        numpy_state['state'].cpu().numpy().astype(np.uint32, copy=False),
+        int(numpy_state['position']),
+        int(numpy_state['has_gauss']),
+        float(numpy_state['cached_gaussian']),
+    ))
+    torch.set_rng_state(state['torch_cpu'].cpu())
+    if torch.cuda.is_available() and state.get('torch_cuda'):
+        torch.cuda.set_rng_state_all(
+            [rng.cpu() for rng in state['torch_cuda']]
+        )
+
+
 def _save_checkpoint(model: ChessModel, optimizer: torch.optim.Optimizer,
-                     path: str, iteration: int, extra: dict) -> None:
+                     scaler: torch.amp.GradScaler, path: str, iteration: int,
+                     training_config: 'TrainingConfig', extra: dict) -> None:
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     payload = {
+        'checkpoint_format_version': 2,
         'iteration': iteration,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
+        'optimizer_class': type(optimizer).__name__,
+        'scaler_state_dict': scaler.state_dict(),
+        'rng_state': _capture_rng_state(),
         'board_encoding': _model_encoding(model),
-        'residual_filters': RESIDUAL_FILTERS,
-        'residual_blocks': RESIDUAL_BLOCKS,
+        'arch_version': _model_architecture(model),
+        'residual_filters': int(getattr(model, 'filters', RESIDUAL_FILTERS)),
+        'residual_blocks': int(getattr(model, 'blocks', RESIDUAL_BLOCKS)),
         # The supervised loader checks for these and refuses to load mismatches.
         'value_loss_weight': extra.get('value_loss_weight'),
         'training_kind': 'self_play_alphazero',
+        'training_config': asdict(training_config),
+        'runtime': _runtime_metadata(),
     }
     payload.update({k: v for k, v in extra.items() if k != 'value_loss_weight'})
-    torch.save(payload, path)
+    tmp = path + '.tmp'
+    torch.save(payload, tmp)
+    os.replace(tmp, path)
+
+
+def _restore_optimizer_checkpoint(path: str,
+                                  optimizer: torch.optim.Optimizer,
+                                  scaler: torch.amp.GradScaler,
+                                  training_config: 'TrainingConfig') -> dict:
+    """Restore the non-model state after load_trained_model rebuilt the net."""
+    checkpoint = torch.load(path, map_location=DEVICE, weights_only=True)
+    if checkpoint.get('training_kind') not in (None, 'self_play_alphazero'):
+        raise ValueError(
+            f'{path!r} is not a self-play training checkpoint '
+            f'(training_kind={checkpoint.get("training_kind")!r})'
+        )
+    if 'optimizer_state_dict' not in checkpoint:
+        raise ValueError(f'{path!r} has no optimizer state; cannot exactly resume')
+    optimizer_class = checkpoint.get('optimizer_class')
+    if optimizer_class not in (None, type(optimizer).__name__):
+        raise ValueError(
+            f'{path!r} used optimizer {optimizer_class!r}, not '
+            f'{type(optimizer).__name__!r}'
+        )
+    recorded_value_weight = checkpoint.get('value_loss_weight')
+    if recorded_value_weight is not None and not np.isclose(
+        float(recorded_value_weight), training_config.value_loss_weight,
+        rtol=0.0, atol=1e-12,
+    ):
+        raise ValueError(
+            f'{path!r} used value_loss_weight={recorded_value_weight}, but '
+            f'this run requested {training_config.value_loss_weight}'
+        )
+    recorded_config = checkpoint.get('training_config') or {}
+    current_config = asdict(training_config)
+    for key in (
+        'games_per_iteration', 'replay_buffer_capacity',
+        'training_steps_per_iteration', 'batch_size', 'learning_rate',
+        'weight_decay', 'value_loss_weight', 'grad_clip',
+        'supervised_dirs', 'supervised_fraction', 'supervised_capacity',
+        'gate_games', 'gate_min_score', 'gate_max_plies',
+        'gate_temperature',
+    ):
+        if key in recorded_config and recorded_config[key] != current_config[key]:
+            raise ValueError(
+                f'{path!r} records {key}={recorded_config[key]!r}, but this '
+                f'run requested {current_config[key]!r}; use the checkpoint '
+                'as a new initialization instead of claiming exact resume'
+            )
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    if 'scaler_state_dict' in checkpoint:
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+    _restore_rng_state(checkpoint.get('rng_state'))
+    return checkpoint
 
 
 def _append_log(log_path: str, record: dict) -> None:
@@ -515,7 +655,7 @@ def run_iteration(
     train_summary = _mean_metrics(train_metrics) if train_metrics else {}
     if gate is None or gate['passed']:
         _save_checkpoint(
-            model, optimizer, ckpt_path, iteration,
+            model, optimizer, scaler, ckpt_path, iteration, training_config,
             extra={
                 'value_loss_weight': training_config.value_loss_weight,
                 'iteration_self_play_games': training_config.games_per_iteration,
@@ -526,6 +666,7 @@ def run_iteration(
                 'mean_value_loss': train_summary.get('value_loss'),
                 'mean_top1_agreement': train_summary.get('top1_agreement'),
                 'gate': gate,
+                'iteration_seed': seed,
             },
         )
     else:
@@ -592,6 +733,12 @@ def run_loop(
 ) -> None:
     assert_training_device()
     print_device_info()
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
     # Resume safety: when continuing from a later iteration without an explicit
     # init checkpoint, load the *previous* iteration's self-play checkpoint
@@ -635,6 +782,31 @@ def run_loop(
         weight_decay=training_config.weight_decay,
     )
     scaler = torch.amp.GradScaler('cuda', enabled=DEVICE.type == 'cuda')
+    if resume_ckpt is not None:
+        resume_state = _restore_optimizer_checkpoint(
+            resume_ckpt, optimizer, scaler, training_config
+        )
+        expected_iteration = start_iteration - 1
+        recorded_iteration = int(
+            resume_state.get('iteration', expected_iteration)
+        )
+        if recorded_iteration != expected_iteration:
+            raise ValueError(
+                f'{resume_ckpt!r} records iteration {recorded_iteration}, but '
+                f'--start_iteration {start_iteration} requires iteration '
+                f'{expected_iteration}'
+            )
+        recorded_seed = resume_state.get('iteration_seed')
+        expected_seed = None if seed is None else seed + expected_iteration
+        if recorded_seed is not None and recorded_seed != expected_seed:
+            raise ValueError(
+                f'{resume_ckpt!r} records iteration_seed={recorded_seed!r}, '
+                f'but --seed implies {expected_seed!r}'
+            )
+        print(
+            f'Restored {type(optimizer).__name__} state from iteration '
+            f'{recorded_iteration} (lr={optimizer.param_groups[0]["lr"]:.2e})'
+        )
 
     buffer = ReplayBuffer(
         capacity=training_config.replay_buffer_capacity,

@@ -599,21 +599,26 @@ class ResidualBlock(nn.Module):
 
 class ChessModel(nn.Module):
     """Perspective ResNet + LSTM with separate legal policy and value heads."""
-    def __init__(self):
+    def __init__(self, filters=RESIDUAL_FILTERS, blocks=RESIDUAL_BLOCKS):
         super().__init__()
+        self.arch_version = 'v2'
+        self.encoding_version = BOARD_ENCODING_VERSION
+        self.encoding_spec = get_encoding_spec(self.encoding_version)
+        self.filters = filters
+        self.blocks = blocks
         self.cnn = nn.Sequential(
             nn.Conv2d(
-                BOARD_CHANNELS, RESIDUAL_FILTERS, kernel_size=3,
+                BOARD_CHANNELS, filters, kernel_size=3,
                 padding=1, bias=False,
             ),
-            nn.BatchNorm2d(RESIDUAL_FILTERS),
+            nn.BatchNorm2d(filters),
             nn.ReLU(inplace=True),
-            *[ResidualBlock(RESIDUAL_FILTERS) for _ in range(RESIDUAL_BLOCKS)],
+            *[ResidualBlock(filters) for _ in range(blocks)],
             nn.Flatten(),
         )
         self.lstm = nn.LSTM(input_size=132, hidden_size=64, batch_first=True)
         self.fc = nn.Sequential(
-            nn.Linear(RESIDUAL_FILTERS * 8 * 8 + 64, 256),
+            nn.Linear(filters * 8 * 8 + 64, 256),
             nn.ReLU(),
             nn.Linear(256, 128),  # Dropout removed — hurts chess CNN performance
             nn.ReLU(),
@@ -649,33 +654,39 @@ class ChessModelV3(nn.Module):
       - Value head reads the conv features directly.
     """
 
-    def __init__(self):
+    def __init__(self, filters=RESIDUAL_FILTERS, blocks=RESIDUAL_BLOCKS,
+                 head_dropout=HEAD_DROPOUT):
         super().__init__()
+        self.arch_version = 'v3'
+        self.encoding_version = BOARD_ENCODING_VERSION_V3
+        self.encoding_spec = get_encoding_spec(self.encoding_version)
+        self.filters = filters
+        self.blocks = blocks
         self.cnn = nn.Sequential(
             nn.Conv2d(
-                BOARD_CHANNELS_V3, RESIDUAL_FILTERS, kernel_size=3,
+                BOARD_CHANNELS_V3, filters, kernel_size=3,
                 padding=1, bias=False,
             ),
-            nn.BatchNorm2d(RESIDUAL_FILTERS),
+            nn.BatchNorm2d(filters),
             nn.ReLU(inplace=True),
-            *[ResidualBlock(RESIDUAL_FILTERS) for _ in range(RESIDUAL_BLOCKS)],
+            *[ResidualBlock(filters) for _ in range(blocks)],
         )
         self.policy_head = nn.Sequential(
-            nn.Conv2d(RESIDUAL_FILTERS, RESIDUAL_FILTERS, kernel_size=3,
+            nn.Conv2d(filters, filters, kernel_size=3,
                       padding=1, bias=False),
-            nn.BatchNorm2d(RESIDUAL_FILTERS),
+            nn.BatchNorm2d(filters),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(HEAD_DROPOUT),
-            nn.Conv2d(RESIDUAL_FILTERS, NUM_MOVE_PLANES, kernel_size=1),
+            nn.Dropout2d(head_dropout),
+            nn.Conv2d(filters, NUM_MOVE_PLANES, kernel_size=1),
         )
         self.value_head = nn.Sequential(
-            nn.Conv2d(RESIDUAL_FILTERS, 8, kernel_size=1, bias=False),
+            nn.Conv2d(filters, 8, kernel_size=1, bias=False),
             nn.BatchNorm2d(8),
             nn.ReLU(inplace=True),
             nn.Flatten(),
             nn.Linear(8 * 8 * 8, 128),
             nn.ReLU(inplace=True),
-            nn.Dropout(HEAD_DROPOUT),
+            nn.Dropout(head_dropout),
             nn.Linear(128, 1),
             nn.Tanh(),
         )
@@ -740,8 +751,22 @@ class ChessModelV4(nn.Module):
 
     def __init__(self, filters=256, blocks=12, head_dropout=HEAD_DROPOUT):
         super().__init__()
+        self.arch_version = 'v4'
+        self.encoding_version = BOARD_ENCODING_VERSION_V3
+        self.encoding_spec = get_encoding_spec(self.encoding_version)
         self.filters = filters
         self.blocks = blocks
+        # The Lichess evaluations dataset contains four-field FENs, so neither
+        # the halfmove clock nor repetition history exists in the v4 training
+        # corpus. Keep those three v3 auxiliary planes at zero at the model
+        # boundary. Without this mask, live six-field FENs activate input
+        # weights that received no training signal and create a train/serve
+        # skew in the already-trained v4 checkpoint.
+        input_plane_mask = torch.ones(1, BOARD_CHANNELS_V3, 1, 1)
+        input_plane_mask[:, BOARD_CHANNELS:, :, :] = 0.0
+        self.register_buffer(
+            '_input_plane_mask', input_plane_mask, persistent=False
+        )
         self.cnn = nn.Sequential(
             nn.Conv2d(BOARD_CHANNELS_V3, filters, kernel_size=3,
                       padding=1, bias=False),
@@ -769,7 +794,7 @@ class ChessModelV4(nn.Module):
         )
 
     def forward(self, board, moves=None):
-        features = self.cnn(board)
+        features = self.cnn(board * self._input_plane_mask)
         policy_planes = self.policy_head(features)
         policy = policy_planes.permute(0, 2, 3, 1).reshape(
             policy_planes.size(0), MOVE_VOCAB_SIZE_V3
@@ -780,10 +805,17 @@ class ChessModelV4(nn.Module):
 
 def build_model(arch_version: str):
     if arch_version == 'v2':
-        return ChessModel(), BOARD_ENCODING_VERSION
+        return ChessModel(
+            filters=RESIDUAL_FILTERS, blocks=RESIDUAL_BLOCKS
+        ), BOARD_ENCODING_VERSION
     if arch_version == 'v3':
-        return ChessModelV3(), BOARD_ENCODING_VERSION_V3
+        return ChessModelV3(
+            filters=RESIDUAL_FILTERS, blocks=RESIDUAL_BLOCKS
+        ), BOARD_ENCODING_VERSION_V3
     if arch_version == 'v4':
+        # Preserve v4's intentionally larger default. Distillation passes
+        # explicit dimensions, while the generic v2/v3 env knobs remain
+        # backward compatible with their historical architectures.
         return ChessModelV4(), BOARD_ENCODING_VERSION_V3
     raise ValueError(f"Unknown ARCH_VERSION: {arch_version!r}")
 
@@ -889,7 +921,8 @@ def evaluate(model, loader, value_criterion, device, max_batches=None):
             policy_logits, value_pred = model(boards, moves)
             masked_logits = mask_illegal_logits(policy_logits, legal_mask)
             policy_loss_per_sample = policy_loss_for_targets(
-                masked_logits, move_idx, target_type
+                masked_logits, move_idx, target_type,
+                legal_mask=legal_mask, label_smoothing=LABEL_SMOOTHING,
             )
             value_loss_per_sample = value_criterion(
                 value_pred.float(), value_target.float()

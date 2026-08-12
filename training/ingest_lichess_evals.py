@@ -17,19 +17,22 @@ Deduplication keeps the deepest evaluation per unique FEN. Validation rows come
 exclusively from hash-bucket 0, so train/val never share a position.
 
 Usage:
-  python -m training.ingest_lichess_evals --num_shards 3
+  python -m training.ingest_lichess_evals --num_shards 3 \
+      --source_revision <immutable-hugging-face-commit-sha>
 """
 
 from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import zlib
-from datetime import datetime
+from datetime import datetime, timezone
 
 import chess
 import numpy as np
@@ -43,9 +46,15 @@ from training.preprocess import VALUE_CP_SCALE  # 600, shared with v2/v3 labels
 # strings, which is why normalization goes through parse_uci per row.)
 _CASTLE_UCI_CANDIDATES = frozenset(('e1h1', 'e1a1', 'e8h8', 'e8a8'))
 
+HF_DATASET = 'Lichess/chess-position-evaluations'
 HF_SHARD_URL = (
-    'https://huggingface.co/datasets/Lichess/chess-position-evaluations/'
-    'resolve/main/data/data_{index:04d}.parquet'
+    'https://huggingface.co/datasets/' + HF_DATASET + '/'
+    'resolve/{revision}/data/data_{index:04d}.parquet'
+)
+SOURCE_REVISION_ENV = 'LICHESS_EVAL_REVISION'
+INGEST_MANIFEST = 'ingest_manifest.json'
+_RAW_REQUIRED_COLUMNS = frozenset(
+    ('fen', 'line', 'depth', 'knodes', 'cp', 'mate')
 )
 
 OUT_SCHEMA = pa.schema([
@@ -56,17 +65,111 @@ OUT_SCHEMA = pa.schema([
 ])
 
 
-def _download_shard(raw_dir: str, index: int) -> str:
+def _atomic_write_json(path: str, payload: dict) -> None:
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write('\n')
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_source_revision(revision: str | None) -> str:
+    """Accept only immutable Hugging Face commit IDs, never branches/tags."""
+    revision = (revision or '').strip().lower()
+    if not re.fullmatch(r'[0-9a-f]{40,64}', revision):
+        raise ValueError(
+            '--source_revision (or LICHESS_EVAL_REVISION) must be an immutable '
+            '40-64 character hexadecimal Hugging Face commit SHA; names such '
+            "as 'main' are intentionally rejected."
+        )
+    return revision
+
+
+def _validate_raw_shard(path: str) -> dict:
+    """Fail before ingestion if a download is truncated or its schema drifted."""
+    try:
+        parquet = pq.ParquetFile(path)
+    except Exception as exc:
+        raise ValueError(f'{path!r} is not a readable Parquet file') from exc
+    columns = set(parquet.schema_arrow.names)
+    missing = sorted(_RAW_REQUIRED_COLUMNS - columns)
+    if missing:
+        raise ValueError(f'{path!r} is missing source columns: {missing}')
+    rows = parquet.metadata.num_rows
+    if rows <= 0:
+        raise ValueError(f'{path!r} contains no rows')
+    return {
+        'rows': rows,
+        'bytes': os.path.getsize(path),
+        'sha256': _sha256_file(path),
+    }
+
+
+def _download_shard(raw_dir: str, index: int,
+                    source_revision: str) -> tuple[str, dict]:
+    source_revision = _validate_source_revision(source_revision)
     path = os.path.join(raw_dir, f'data_{index:04d}.parquet')
-    if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
-        print(f'  raw shard {index} already present', flush=True)
-        return path
-    url = HF_SHARD_URL.format(index=index)
+    provenance_path = path + '.source.json'
+    url = HF_SHARD_URL.format(revision=source_revision, index=index)
+
+    # A filename alone cannot prove which moving dataset revision produced it.
+    # Reuse only a cache whose sidecar pins the same URL/revision and whose
+    # content still matches the recorded digest.
+    if os.path.exists(path) and os.path.exists(provenance_path):
+        try:
+            with open(provenance_path, encoding='utf-8') as f:
+                cached = json.load(f)
+            metadata = _validate_raw_shard(path)
+            if (
+                cached.get('source_revision') == source_revision and
+                cached.get('url') == url and
+                cached.get('sha256') == metadata['sha256']
+            ):
+                print(f'  raw shard {index} already present and verified',
+                      flush=True)
+                return path, cached
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        print(f'  raw shard {index} cache provenance is invalid; refreshing',
+              flush=True)
+    elif os.path.exists(path):
+        print(f'  raw shard {index} has no revision sidecar; refreshing',
+              flush=True)
+
     print(f'  downloading shard {index}: {url}', flush=True)
-    subprocess.run(
-        ['curl', '-sL', '--fail', '-o', path, url], check=True
-    )
-    return path
+    part_path = f'{path}.part-{os.getpid()}'
+    try:
+        subprocess.run(
+            [
+                'curl', '-sS', '-L', '--fail', '--retry', '3',
+                '--output', part_path, url,
+            ],
+            check=True,
+        )
+        metadata = _validate_raw_shard(part_path)
+        provenance = {
+            'dataset': HF_DATASET,
+            'index': index,
+            'source_revision': source_revision,
+            'url': url,
+            **metadata,
+        }
+        os.replace(part_path, path)
+        _atomic_write_json(provenance_path, provenance)
+        return path, provenance
+    finally:
+        if os.path.exists(part_path):
+            os.remove(part_path)
 
 
 def _flush_bucket(tmp_dir: str, bucket: int, part: int, rows: list) -> None:
@@ -222,6 +325,12 @@ def dedupe_and_emit(tmp_dir: str, out_dir: str, num_buckets: int,
               flush=True)
     train_writer.close()
     val_writer.close()
+    if val_writer.total != val_positions:
+        raise ValueError(
+            f'validation split requested {val_positions:,} positions but '
+            f'bucket 0 contained only {val_writer.total:,}; increase the input '
+            'or reduce --val_positions'
+        )
     stats['train_rows'] = train_writer.total
     stats['val_rows'] = val_writer.total
 
@@ -246,7 +355,23 @@ def main():
                         help='Keep raw shards after processing (default: '
                              'delete to save disk).')
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument(
+        '--source_revision', default=os.environ.get(SOURCE_REVISION_ENV),
+        help='Immutable Hugging Face dataset commit SHA. May also be set via '
+             f'{SOURCE_REVISION_ENV}; branches/tags are rejected.',
+    )
     args = parser.parse_args()
+
+    try:
+        source_revision = _validate_source_revision(args.source_revision)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.num_shards <= 0 or args.first_shard < 0:
+        parser.error('--num_shards must be positive and --first_shard non-negative')
+    if args.buckets <= 0 or args.rows_per_shard <= 0:
+        parser.error('--buckets and --rows_per_shard must be positive')
+    if args.val_positions <= 0:
+        parser.error('--val_positions must be positive')
 
     os.makedirs(args.raw_dir, exist_ok=True)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -254,6 +379,12 @@ def main():
         raise SystemExit(f'{args.out_dir!r} already contains shards; '
                          'use a fresh directory.')
     tmp_dir = os.path.join(args.out_dir, '_tmp_buckets')
+    if os.path.isdir(tmp_dir) and os.listdir(tmp_dir):
+        raise SystemExit(
+            f'{tmp_dir!r} contains partial data from an earlier run. Remove '
+            'that directory or choose a fresh --out_dir; stale bucket parts '
+            'are never mixed into a new corpus.'
+        )
     os.makedirs(tmp_dir, exist_ok=True)
 
     rng = np.random.default_rng(args.seed)
@@ -264,14 +395,21 @@ def main():
     }
     part_counters = [0] * args.buckets
 
-    start = datetime.now()
+    source_shards = []
+    start = datetime.now(timezone.utc)
     for i in range(args.first_shard, args.first_shard + args.num_shards):
-        raw_path = _download_shard(args.raw_dir, i)
+        raw_path, source_metadata = _download_shard(
+            args.raw_dir, i, source_revision
+        )
+        source_shards.append(source_metadata)
         print(f'  partitioning shard {i}...', flush=True)
         partition_shard(raw_path, tmp_dir, args.buckets, args.min_depth,
                         part_counters, stats)
         if not args.keep_raw:
             os.remove(raw_path)
+            provenance_path = raw_path + '.source.json'
+            if os.path.exists(provenance_path):
+                os.remove(provenance_path)
         print(f'  shard {i} done | rows_in={stats["rows_in"]:,}', flush=True)
 
     print('deduplicating buckets and writing output shards...', flush=True)
@@ -280,14 +418,58 @@ def main():
     shutil.rmtree(tmp_dir)
 
     stats['min_depth'] = args.min_depth
+    stats['seed'] = args.seed
+    stats['source_dataset'] = HF_DATASET
+    stats['source_revision'] = source_revision
+    stats['first_shard'] = args.first_shard
+    stats['num_shards'] = args.num_shards
+    stats['buckets'] = args.buckets
+    stats['requested_val_positions'] = args.val_positions
+    stats['rows_per_shard'] = args.rows_per_shard
     stats['value_convention'] = (
         'side-to-move POV, tanh(cp/600), mate=+/-1; source cp was White-POV '
         'and negated for black-to-move (verified vs mate-in-1 probes)'
     )
-    stats['elapsed_seconds'] = (datetime.now() - start).total_seconds()
-    with open(os.path.join(args.out_dir, 'ingest_stats.json'), 'w',
-              encoding='utf-8') as f:
-        json.dump(stats, f, indent=2)
+    stats['elapsed_seconds'] = (
+        datetime.now(timezone.utc) - start
+    ).total_seconds()
+    stats_path = os.path.join(args.out_dir, 'ingest_stats.json')
+    _atomic_write_json(stats_path, stats)
+
+    output_shards = []
+    for path in sorted(glob.glob(os.path.join(args.out_dir, '*.parquet'))):
+        parquet = pq.ParquetFile(path)
+        if not parquet.schema_arrow.equals(OUT_SCHEMA):
+            raise ValueError(f'output shard {path!r} has an unexpected schema')
+        output_shards.append({
+            'name': os.path.basename(path),
+            'rows': parquet.metadata.num_rows,
+            'bytes': os.path.getsize(path),
+            'sha256': _sha256_file(path),
+        })
+    manifest = {
+        'manifest_version': 2,
+        'status': 'complete',
+        'created_at_utc': datetime.now(timezone.utc).isoformat(),
+        'source': {
+            'dataset': HF_DATASET,
+            'revision': source_revision,
+            'shards': source_shards,
+        },
+        'parameters': {
+            'first_shard': args.first_shard,
+            'num_shards': args.num_shards,
+            'min_depth': args.min_depth,
+            'val_positions': args.val_positions,
+            'buckets': args.buckets,
+            'rows_per_shard': args.rows_per_shard,
+            'seed': args.seed,
+        },
+        'split_key': 'exact four-field source FEN (CRC32 bucket then dedupe)',
+        'outputs': output_shards,
+        'stats': stats,
+    }
+    _atomic_write_json(os.path.join(args.out_dir, INGEST_MANIFEST), manifest)
     print(json.dumps(stats, indent=2))
 
 

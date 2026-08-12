@@ -29,7 +29,7 @@ def main() -> int:
         )
         print(
             "Install CUDA PyTorch, for example:\n"
-            "  pip install torch torchvision --index-url "
+            "  pip install torch --index-url "
             "https://download.pytorch.org/whl/cu124",
             flush=True,
         )

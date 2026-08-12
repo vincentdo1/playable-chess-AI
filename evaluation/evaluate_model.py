@@ -14,6 +14,8 @@ from neural_network import (
     BOARD_ENCODING_VERSION,
     BOARD_ENCODING_VERSION_V3,
     ChunkDataset,
+    LABEL_SMOOTHING,
+    MODEL_PATH,
     VALUE_LOSS_WEIGHT,
     get_encoding_spec,
     make_collate_policy_batch,
@@ -22,7 +24,29 @@ from neural_network import (
 )
 
 
-def evaluate_chunks(model, test_dir, batch_size=512, top_k=(1, 3, 5)):
+def checkpoint_objective(path: str | None) -> dict:
+    """Read the loss contract without constructing a second model."""
+    path = path or MODEL_PATH
+    checkpoint = torch.load(path, map_location='cpu', weights_only=True)
+    if not isinstance(checkpoint, dict):
+        raise ValueError(f'{path!r} is not a checkpoint dictionary')
+    return {
+        'value_loss_weight': float(
+            checkpoint.get('value_loss_weight', VALUE_LOSS_WEIGHT)
+        ),
+        'label_smoothing': float(
+            checkpoint.get('label_smoothing', LABEL_SMOOTHING)
+        ),
+        'metadata_complete': (
+            'value_loss_weight' in checkpoint and
+            'label_smoothing' in checkpoint
+        ),
+    }
+
+
+def evaluate_chunks(model, test_dir, batch_size=512, top_k=(1, 3, 5),
+                    value_loss_weight=VALUE_LOSS_WEIGHT,
+                    label_smoothing=LABEL_SMOOTHING):
     # Dataset and collator follow the loaded checkpoint's encoding so both
     # model generations can be measured against their own chunk format.
     encoding = getattr(model, 'encoding_version', BOARD_ENCODING_VERSION)
@@ -63,14 +87,16 @@ def evaluate_chunks(model, test_dir, batch_size=512, top_k=(1, 3, 5)):
             policy_logits, value_pred = model(boards, moves)
             logits = mask_illegal_logits(policy_logits, legal_mask)
             policy_loss_per_sample = policy_loss_for_targets(
-                logits, targets, target_type
+                logits, targets, target_type,
+                legal_mask=legal_mask,
+                label_smoothing=label_smoothing,
             )
             value_loss_per_sample = value_criterion(
                 value_pred.float(), value_target.float()
             )
             loss_per_sample = (
                 policy_loss_per_sample +
-                VALUE_LOSS_WEIGHT * value_loss_per_sample
+                value_loss_weight * value_loss_per_sample
             )
             total_loss += (loss_per_sample * sample_weight).sum().item()
             total_policy_loss += (
@@ -109,6 +135,8 @@ def evaluate_chunks(model, test_dir, batch_size=512, top_k=(1, 3, 5)):
         'value_mae': total_value_abs_error / max(total_weight, 1e-6),
         'positions': total,
         'negative_positions': negative_total,
+        'value_loss_weight': value_loss_weight,
+        'label_smoothing': label_smoothing,
     }
     metrics.update({f'top_{k}_acc': correct[k] / max(total, 1) for k in top_k})
     metrics.update({
@@ -177,6 +205,16 @@ def main():
     args = parser.parse_args()
 
     model = load_trained_model(args.model) if args.model else load_trained_model()
+    checkpoint_path = getattr(
+        model, 'checkpoint_path', args.model or MODEL_PATH
+    )
+    objective = checkpoint_objective(checkpoint_path)
+    if not objective['metadata_complete']:
+        print(
+            'WARNING: checkpoint predates the complete loss contract; missing '
+            'objective fields use current module defaults.',
+            flush=True,
+        )
     test_dir = args.test_dir
     if not test_dir:
         encoding = getattr(model, 'encoding_version', BOARD_ENCODING_VERSION)
@@ -184,7 +222,13 @@ def main():
                     if encoding == BOARD_ENCODING_VERSION_V3
                     else 'data/test_chunks')
     print(f"Test chunks: {test_dir}")
-    metrics = evaluate_chunks(model, test_dir, batch_size=args.batch_size)
+    metrics = evaluate_chunks(
+        model,
+        test_dir,
+        batch_size=args.batch_size,
+        value_loss_weight=objective['value_loss_weight'],
+        label_smoothing=objective['label_smoothing'],
+    )
 
     print("\nHeld-out test metrics")
     print(f"  positions : {metrics['positions']:,} positive")
@@ -194,6 +238,8 @@ def main():
     print(f"  policy    : {metrics['policy_loss']:.4f}")
     print(f"  value     : {metrics['value_loss']:.4f}")
     print(f"  value MAE : {metrics['value_mae']:.4f}")
+    print(f"  objective : policy smoothing={metrics['label_smoothing']:.3f}, "
+          f"value weight={metrics['value_loss_weight']:.3f}")
     print(f"  top-1 acc : {metrics['top_1_acc']:.4f}")
     print(f"  top-3 acc : {metrics['top_3_acc']:.4f}")
     print(f"  top-5 acc : {metrics['top_5_acc']:.4f}")
