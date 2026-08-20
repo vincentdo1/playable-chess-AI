@@ -1,26 +1,16 @@
-"""Stdin/stdout move server for cross-branch model evaluation.
+"""Stdin/stdout move server driven by cross_model_match.py.
 
-Lets a model running in one Python process/working-dir be driven by another.
-The companion driver, cross_model_match.py, spawns one of these per player
-and pipes requests/responses over JSON line protocol.
+Subprocess isolation lets each model run under its own branch's code. One
+JSON object per line:
 
-Why this exists: comparing models trained against different architectures
-(e.g. the older repo checkpoint vs. a freshly trained current-architecture
-checkpoint) means each must run in its own branch's code. Subprocess
-isolation keeps each model in its native environment.
+  ready    {"ready": true, "model_path": "...", "has_mcts": true}
+  request  {"history": ["e2e4","e7e5"], "method": "policy"|"mcts", ...}
+  response {"move": "g1f3"} or {"error": "..."}
+  shutdown {"cmd": "quit"}, or stdin closes
 
-Protocol:
-  Startup ack    : server writes one JSON line, e.g.
-                   {"ready": true, "model_path": "...", "has_mcts": true}
-  Request        : driver writes one JSON line per move:
-                   {"history": ["e2e4","e7e5"], "method": "policy"|"mcts", ...}
-  Response       : server writes one JSON line:
-                   {"move": "g1f3"}   or   {"error": "..."}
-  Shutdown       : driver sends {"cmd":"quit"} or closes stdin.
-
-Works on any branch that has load_model.load_trained_model + predict_next_move.
-MCTS method also requires mcts_player.mcts_search_best_move; if absent, the
-server reports has_mcts=false at startup and rejects mcts requests.
+Requires load_model.load_trained_model + predict_next_move. MCTS additionally
+needs mcts_player.mcts_search_best_move; without it the server reports
+has_mcts=false at startup and rejects mcts requests.
 """
 
 from __future__ import annotations

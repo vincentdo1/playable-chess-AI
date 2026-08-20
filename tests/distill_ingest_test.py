@@ -1,7 +1,5 @@
 """Audit-grade validation of the v4 distillation dataset.
 
-Standalone runnable:  python tests/distill_ingest_test.py
-
 The 2026-07-02 probe on raw shard 0 established that the Lichess dump's
 cp/mate are WHITE-POV (mate=+1 with black to move was never a black mate,
 0/150; mate=-1 with black to move always was, 150/150). Ingestion converts to

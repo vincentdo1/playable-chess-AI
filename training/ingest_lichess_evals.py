@@ -4,21 +4,17 @@ Source: https://huggingface.co/datasets/Lichess/chess-position-evaluations
 (mirror of https://database.lichess.org/ evaluations; CC0). Raw schema per row:
 fen, line (PV, UCI), depth, knodes, cp, mate.
 
-Sign convention (verified empirically on shard 0, 2026-07-02 — see
+Sign convention (verified empirically on shard 0, 2026-07-02 â€” see
 tests/distill_ingest_test.py): **cp and mate are from White's point of view.**
 This tool converts them to the side-to-move convention used everywhere in this
 repo (value_target = tanh(cp_stm / 600), mate -> +/-1) so downstream code never
 sees the White-POV numbers.
 
-Output: compact parquet shards with columns (fen, move, value_target, depth) —
+Output: compact parquet shards with columns (fen, move, value_target, depth) â€”
 board tensors are intentionally NOT materialized; the training DataLoader
-encodes FENs on the fly with the audited v3 codecs (docs/ROADMAP_2500.md WS1).
-Deduplication keeps the deepest evaluation per unique FEN. Validation rows come
-exclusively from hash-bucket 0, so train/val never share a position.
-
-Usage:
-  python -m training.ingest_lichess_evals --num_shards 3 \
-      --source_revision <immutable-hugging-face-commit-sha>
+encodes FENs on the fly with the audited v3 codecs. Deduplication keeps the
+deepest evaluation per unique FEN. Validation rows come exclusively from
+hash-bucket 0, so train/val never share a position.
 """
 
 from __future__ import annotations

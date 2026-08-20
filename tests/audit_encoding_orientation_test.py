@@ -1,7 +1,5 @@
 """Audit tests 1+2: board encoding correctness and side-to-move orientation.
 
-Standalone runnable (no pytest):  python tests/audit_encoding_orientation_test.py
-
 What is proven here:
   1. fen_to_tensor / board_to_tensor_v3 are lossless: an independent decoder
      reconstructs the exact position (pieces, castling, legal en passant)

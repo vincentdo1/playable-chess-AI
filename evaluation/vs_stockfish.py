@@ -1,14 +1,10 @@
 """Reproducible model-vs-Stockfish evaluation.
 
-The default protocol plays every built-in opening twice with colors reversed.
-It records the exact configuration, artifact identities, PGNs, per-model-move
-latency, and confidence intervals.  A UCI_LimitStrength result is deliberately
+The default protocol plays every built-in opening twice with colors reversed,
+recording the exact configuration, artifact identities, PGNs, per-model-move
+latency, and confidence intervals. A UCI_LimitStrength result is deliberately
 reported as a result against that Stockfish setting under this harness; it is
-not presented as a human-rating estimate.
-
-Example:
-  python -m evaluation.vs_stockfish \
-      --uci_elo 2500 --mode mcts --sims 200 --output_dir evaluation/results
+not a human-rating estimate.
 """
 
 from __future__ import annotations

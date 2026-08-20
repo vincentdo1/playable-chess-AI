@@ -121,9 +121,11 @@ playable-chess-AI/
     cross_model_match.py   Cross-branch model matches (subprocess)
     move_server.py         JSON line move server (companion)
     play_match.py          Headless engine matches, PGN output
+    watch_models.py        Pygame window: two checkpoints play each other
   scripts/
     train_pipeline.sh      preprocess -> train -> self-play
     compare_checkpoints.ps1   Full Elo comparison matrix
+    visualize_network.py   Animates the forward pass (GIF/MP4/WebM)
 
   docs/
     PROJECT_STATUS.md      Current implementation/release status
@@ -200,7 +202,10 @@ python -m training.preprocess --no_cp_loss # game-result value targets only
 $env:PREPROCESS_ENCODING = "perspective_v2"  # legacy v2 chunks if needed
 ```
 
-Reads `extractions/GM_games_2600.zip` and `extractions/magnus.zip`, writes `data/{train,val,test}_chunks_v3/`.
+Reads the archives named by `GM_ZIP` and `MAGNUS_ZIP` (defaults
+`extractions/GM_games_2600.zip` and `extractions/magnus.zip`) and writes
+`data/{train,val,test}_chunks_v3/`. `extractions/` is gitignored — supply the
+archives yourself or point the two variables at your own PGN/zip sources.
 
 Optionally cap duplicated opening positions before training (82% of v2
 opening samples were repeats, which starves middlegame learning):
@@ -268,6 +273,15 @@ Do not reuse a corpus without its completed manifest, silently overwrite a
 checkpoint, or present the historical v4 model as reproducible: its original
 source revision was not recorded. New manifests improve future runs but cannot
 retroactively identify that dataset snapshot.
+
+The two stages also run directly, which is what `run_phase2.ps1` drives:
+
+```powershell
+python -m training.ingest_lichess_evals --num_shards 3 `
+  --source_revision <immutable-hugging-face-commit-sha>
+python -m training.train_distill        # 3 epochs over data/distill_chunks_v4
+python -m training.train_distill --resume model\grandmaster_resnet_v4_distill.pt
+```
 
 The script's gauntlets write JSON and PGN artifacts under
 `evaluation/results/phase2_<elo>`. Every rung requires model p95 latency no
@@ -527,6 +541,14 @@ Install the artifact-independent test environment and run the same suite as CI:
 ```bash
 python -m pip install --requirement requirements-test.txt
 python -m pytest -q
+```
+
+Every `tests/*_test.py` file is also runnable on its own without pytest, which
+is how the artifact-dependent audits are normally driven:
+
+```powershell
+python tests\audit_encoding_orientation_test.py
+python tests\audit_value_semantics_test.py
 ```
 
 GitHub Actions runs this fast suite on pull requests and pushes to `main`.

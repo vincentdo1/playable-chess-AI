@@ -1,25 +1,17 @@
 """AlphaZero-style iteration loop: self-play, replay-buffer training, repeat.
 
-Each iteration:
-  1. The current network plays ``games_per_iteration`` self-play games. Every
-     position visited becomes a training sample whose policy target is the MCTS
-     visit distribution and whose value target is the eventual game outcome.
-  2. The new samples are added to a fixed-size replay buffer (oldest chunks
-     evicted once it overflows).
-  3. The network is trained for ``training_steps_per_iteration`` mini-batch
-     steps on uniformly-sampled positions from the buffer.
-  4. A checkpoint is saved and the next iteration begins with the updated net.
+Each iteration plays ``games_per_iteration`` self-play games (policy target =
+MCTS visit distribution, value target = eventual outcome), adds them to a
+fixed-size replay buffer, trains ``training_steps_per_iteration`` mini-batch
+steps on uniform samples from it, then checkpoints and repeats with the
+updated net.
 
-What this script does *not* do (intentionally, to keep it tractable):
-  - Run self-play across multiple processes. One game at a time.
-  - Gate new checkpoints against the previous one via match play. AlphaGo Zero
-    did this; AlphaZero dropped it. We drop it too — the latest checkpoint is
-    always used for the next round of self-play.
+Deliberately omitted: multi-process self-play, and AlphaGo Zero's match-play
+gate on new checkpoints (AlphaZero dropped it too).
 
-Numerical detail to keep in mind: the policy loss is the cross-entropy of the
-MCTS visit distribution against the model's softmax over *legal* moves only.
-Illegal moves are masked out of the softmax denominator before computing
-log-probabilities, matching how the network is used at inference.
+The policy loss is cross-entropy of the MCTS visit distribution against the
+model's softmax over *legal* moves only â€” illegal moves leave the softmax
+denominator before log-probabilities, matching inference.
 """
 
 from __future__ import annotations

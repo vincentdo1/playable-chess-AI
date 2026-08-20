@@ -6,10 +6,6 @@ backend conditions), Stockfish scores the cp loss of each chosen move.
 Configs compared:
   production : value_weight=2.0, value_candidates=0 (current live default)
   guarded    : production + inference/blunder_guard filtering
-
-Usage:
-  python -m evaluation.diagnose_blunder_guard \
-      --per_phase 150 --guard_depth 2 --guard_margin 150
 """
 
 import argparse

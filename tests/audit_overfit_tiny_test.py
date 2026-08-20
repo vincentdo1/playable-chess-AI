@@ -1,7 +1,5 @@
 """Audit test 5: tiny-batch overfit through the REAL training math.
 
-Standalone runnable (no pytest):  python tests/audit_overfit_tiny_test.py
-
 Trains a small ChessModelV3 (64 filters x 2 blocks, CPU) on 256 real rows
 from data/train_chunks_v3 using the exact production loss path
 (mask_illegal_logits + policy_loss_for_targets + MSE value loss, batches

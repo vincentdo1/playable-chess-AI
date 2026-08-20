@@ -10,10 +10,6 @@ ChessModelV4 masks those auxiliary channels at both training and serving time
 Checkpoints store arch_version='v4' (+ filters/blocks), which
 load_model.load_trained_model dispatches on; the board encoding remains
 'perspective_v3'.
-
-Usage (defaults = Phase-1 recipe):
-  python -m training.train_distill                # 3 epochs over data/distill_chunks_v4
-  python -m training.train_distill --resume model/grandmaster_resnet_v4_distill.pt
 """
 
 from __future__ import annotations

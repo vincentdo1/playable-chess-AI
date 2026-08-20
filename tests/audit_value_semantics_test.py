@@ -1,7 +1,5 @@
 """Audit test 4: value-target sign conventions across the whole chain.
 
-Standalone runnable (no pytest):  python tests/audit_value_semantics_test.py
-
 The convention everywhere is: value = expected outcome from the CURRENT
 side-to-move's point of view, in [-1, 1]. This test proves each link:
   a. preprocess label functions (_result_value_for_color, _cp_to_value)

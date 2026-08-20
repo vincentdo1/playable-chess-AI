@@ -315,8 +315,7 @@ longer thinking time, or revisiting the benchmark target explicitly.
 
 - **2026-07-05 — A machine-specific operational handoff was added.** It has
   since been superseded by `PROJECT_STATUS.md`, `MODEL_CARD.md`, and
-  `RAILWAY_DEPLOY.md`; `HANDOFF_2500.md` now preserves only historical context.
-  Support fixes
+  `RAILWAY_DEPLOY.md`, and the handoff document was removed. Support fixes
   landed with it: `run_phase2.ps1` pins `.venv\Scripts\python.exe` because the
   workstation's bare `python` was an unprovisioned 3.14; trainer `--resume`
   semantics were clarified in help + an explicit “nothing left to train” note.

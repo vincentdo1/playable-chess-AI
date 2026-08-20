@@ -10,11 +10,6 @@ Buckets held-out test positions by fullmove number and reports, per bucket:
   - value-head MAE and correlation against the Stockfish-derived target
   - mean policy entropy over legal moves (a flat policy means the
     value-head reranking in load_model.predict_next_move dominates)
-
-Usage:
-  python -m evaluation.diagnose_phase_degradation \
-      --model model/grandmaster_resnet_v2_resumed.pt \
-      --chunk_dir data/test_chunks --max_positions 150000
 """
 
 import argparse

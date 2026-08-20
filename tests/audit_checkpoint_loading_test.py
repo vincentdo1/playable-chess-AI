@@ -1,25 +1,19 @@
 """Audit test 7: evaluation/serving really loads the intended checkpoint.
 
-Standalone runnable (no pytest):  python tests/audit_checkpoint_loading_test.py
-
 For every checkpoint in model/:
   - a STRICT state-dict load into the architecture selected by the stored
-    board_encoding must succeed (exact key and shape match with today's
-    code — no silently skipped or randomly initialized layers);
+    board_encoding must succeed (exact key and shape match with today's code â€”
+    no silently skipped or randomly initialized layers);
   - stored residual_filters/residual_blocks must match the architecture the
     loaders would build right now;
   - load_trained_model() must hand back weights BIT-IDENTICAL to the file's
-    tensors (proves the loader applied them), with the right encoding spec
-    attached and deterministic eval-mode outputs.
+    tensors, with the right encoding spec attached and deterministic
+    eval-mode outputs.
 
-It then regression-tests the three hazards found by the 2026-07-02 audit,
-which are now fixed:
-  - load_trained_model REJECTS a checkpoint missing whole layers instead of
-    silently serving a partially random network (old strict=False behavior);
-  - the default MODEL_PATH (used by backend/app.py and every tool that
-    calls load_trained_model() without a path) points at the v3 checkpoint;
-  - evaluation/evaluate_model.py follows the loaded checkpoint's encoding,
-    so held-out metrics work for v3 (and still for v2).
+Then regression-tests three fixed hazards: load_trained_model rejects a
+checkpoint missing whole layers rather than serving a partly random network;
+the default MODEL_PATH points at v3; and evaluate_model.py follows the loaded
+checkpoint's encoding.
 """
 
 import glob

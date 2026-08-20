@@ -26,3 +26,7 @@ Thumbs.db
 desktop.ini
 *.log
 *.tmp
+eval_logs/
+cross_match*.pgn
+selfplay_log.jsonl
+.pytest_cache/

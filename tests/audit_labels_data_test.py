@@ -1,8 +1,6 @@
 """Audit tests 3+4+6 on REAL v3 chunk data: label legality, value targets,
 and train-vs-inference preprocessing parity.
 
-Standalone runnable (no pytest):  python tests/audit_labels_data_test.py
-
 What is proven here, on sampled rows from every v3 chunk directory:
   3. Policy labels are legal: move_idx is inside its own legal-move window,
      the stored legal window equals the legal moves recomputed from the FEN,

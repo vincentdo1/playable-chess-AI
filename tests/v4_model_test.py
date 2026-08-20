@@ -1,7 +1,5 @@
 """ChessModelV4 (SE-ResNet distillation net) sanity tests.
 
-Standalone runnable:  python tests/v4_model_test.py
-
 Covers: forward shapes, checkpoint round-trip through load_trained_model's
 arch_version dispatch (bit-identical weights, v3 models unaffected),
 deterministic eval, and a tiny-batch overfit through the exact training loss

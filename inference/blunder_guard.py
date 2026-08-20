@@ -1,14 +1,12 @@
 """Tactical safety net for the raw policy player.
 
-The supervised policy blunders (>=300cp) on ~14% of moves after move 20
-(see evaluation/diagnose_phase_degradation.py findings). This module vetoes
-the worst of those without changing the model: the network's top candidates
-are scored with the existing shallow alpha-beta (chess_player/heuristics),
-and a candidate is only played if it doesn't lose material relative to the
-best candidate by more than a margin.
-
-The model still chooses among tactically-sound moves, so style is preserved;
-the search only acts as a guard rail.
+The supervised policy blunders (>=300cp) on ~14% of moves after move 20 (see
+evaluation/diagnose_phase_degradation.py). This module vetoes the worst of
+those without changing the model: the network's top candidates are scored with
+the existing shallow alpha-beta (chess_player/heuristics), and a candidate is
+played only if it doesn't lose material relative to the best candidate by more
+than a margin. The model still chooses among tactically-sound moves, so style
+is preserved.
 
 Cost: GUARD_CANDIDATES shallow searches per move (pure Python). Depth 2 is
 ~tens of ms; depth 3 catches more tactics but costs a few hundred ms.

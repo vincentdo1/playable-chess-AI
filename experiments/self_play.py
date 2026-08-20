@@ -1,26 +1,21 @@
 """Generate self-play training data using MCTS-guided games.
 
-For each move in a self-play game, MCTS picks the move; afterwards we keep:
-  - the position the search saw (board tensor + move history),
-  - the MCTS visit-count distribution over legal children,
-  - the eventual game outcome from this position's side-to-move POV.
-
-These become the policy and value targets when the network is retrained. A net
-that imitates the MCTS visit distribution implements the AlphaZero policy
-improvement operator: each generation's raw policy approximates the previous
-generation's policy *plus search*, so the next round of MCTS is stronger.
+For each move MCTS picks the move; afterwards we keep the position the search
+saw (board tensor + move history), the MCTS visit-count distribution over legal
+children, and the eventual outcome from this position's side-to-move POV. A net
+that imitates the visit distribution implements the AlphaZero policy
+improvement operator, so the next round of MCTS is stronger.
 
 Correctness details that matter here:
-  - Dirichlet noise at the root during self-play, so opening play diversifies.
-    Without it, every self-play game looks identical and the buffer collapses.
-  - Two-stage temperature for move selection: temperature=1 for the first
-    ``temperature_threshold`` moves (sample from visits, gives variety),
-    temperature=0 (greedy on visits) afterwards.
-  - Visit distributions are stored sparsely (only legal moves), in the side-to-
-    move's perspective via move_to_policy_index(..., flip=is_black) — matching
-    the format the model expects at training and inference time.
-  - The value target on a position is +1 / 0 / -1 from that position's side-to-
-    move POV, derived once at game end and broadcast to every recorded position.
+  - Dirichlet noise at the root, or every self-play game looks identical and
+    the buffer collapses.
+  - Two-stage temperature: 1 for the first ``temperature_threshold`` moves
+    (sample from visits), 0 (greedy) afterwards.
+  - Visit distributions stored sparsely (legal moves only) in the side-to-
+    move's perspective via move_to_policy_index(..., flip=is_black), matching
+    what the model expects at training and inference time.
+  - The value target is +1/0/-1 from the position's side-to-move POV, derived
+    once at game end and broadcast to every recorded position.
 """
 
 from __future__ import annotations

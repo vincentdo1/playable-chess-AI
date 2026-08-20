@@ -10,11 +10,6 @@ move with temperature 0 under two configs:
 Stockfish then scores the centipawn loss of each chosen move. If the
 production config blunders more in the middlegame/endgame than policy-only,
 the noisy value head (corr ~0.3 after move 20) is what's giving pieces away.
-
-Usage:
-  python -m evaluation.diagnose_value_rerank \
-      --model model/grandmaster_resnet_v2_resumed.pt \
-      --chunk_dir data/test_chunks --per_phase 200 --engine_time 0.06
 """
 
 import argparse

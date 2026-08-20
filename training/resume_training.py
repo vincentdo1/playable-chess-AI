@@ -1,44 +1,14 @@
-"""Resume/extend supervised training from an existing checkpoint, safely.
+"""Resume supervised training from a checkpoint without regressing it.
 
-Why this exists
----------------
-The base model `grandmaster_model_perspective_resnet_negatives_v2.pt` stopped
-improving at epoch 6 (val_loss=1.832) and early-stopping killed the run at
-epoch ~11. Inspection of neural_network.py shows the likely cause is a schedule
-conflict, not true convergence:
+Reuses neural_network.py's dataset, collate, model, loss, and per-epoch
+train/eval functions verbatim; only the optimizer/scheduler/early-stop policy
+and the checkpoint gating differ. Three guarantees:
 
-  * ReduceLROnPlateau(factor=0.5, patience=3) only halved the LR once before
-  * EARLY_STOP_PATIENCE=5 terminated the run two epochs later.
-
-So the reduced learning rate never had time to take effect. This script resumes
-from the saved checkpoint with a gentler, non-self-sabotaging schedule and more
-patience, to squeeze out the improvement that was left on the table.
-
-Safety guarantees (so the result is never worse than what you have now)
-----------------------------------------------------------------------
-1. Reads the loaded checkpoint's recorded val_loss and seeds best_val_loss with
-   it, so a new checkpoint is ONLY written when it genuinely beats the current
-   model on validation. The current model can never be regressed by this run.
-2. Writes to a SEPARATE --output path. The input checkpoint file is never
-   touched, so your deployed model is safe no matter what happens.
-3. Re-validates the loaded weights up front and prints that baseline val_loss,
-   so you can confirm the resume actually started from your model (sanity check
-   against silently training from random init).
-
-It reuses neural_network.py's dataset, collate, model, loss and per-epoch
-train/eval functions verbatim, so the math matches the original training
-exactly. Only the optimizer/scheduler/early-stop policy and the checkpoint
-gating differ.
-
-Usage (PowerShell, venv active, run from repo root):
-  $env:TRAIN_DIR = "data/train_chunks"
-  $env:VAL_DIR   = "data/val_chunks"
-  python resume_training.py `
-    --init model/grandmaster_model_perspective_resnet_negatives_v2.pt `
-    --output model/grandmaster_resnet_v2_resumed.pt `
-    --epochs 40 --lr 3e-4 --early_stop_patience 10 --lr_patience 4
-
-Then compare the two with eval_arena.py before deploying the new one.
+1. best_val_loss is seeded from the source checkpoint's recorded value, so a
+   new checkpoint is written only when it genuinely beats the source.
+2. Output goes to a separate --output path; the input is never touched.
+3. The loaded weights are re-validated up front and the baseline printed, so a
+   silent train-from-random-init is visible.
 """
 
 from __future__ import annotations

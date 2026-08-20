@@ -1,7 +1,5 @@
 """Focused ML data/checkpoint contract regressions.
 
-Standalone runnable:  python tests/ml_checkpoint_contract_test.py
-
 These tests intentionally exercise the production checkpoint writers and
 resume helpers. Synthetic hand-written model payloads would not catch metadata
 drift between a writer and load_model's architecture dispatch.

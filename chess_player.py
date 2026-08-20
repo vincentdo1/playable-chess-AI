@@ -26,7 +26,6 @@ def _order_moves(board):
             attacker_val = _PIECE_VALUES_CP.get(attacker.piece_type, 0) if attacker else 0
             score = 10000 + victim_val - attacker_val
 
-        # Queen promotion is the highest priority move — beats any check, fix in next update
         if move.promotion == chess.QUEEN:
             score += 11000
         elif move.promotion:

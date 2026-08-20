@@ -1,11 +1,4 @@
-"""Animate the chess CNN+LSTM forward pass as glowing nodes + synapses.
-
-Usage:
-    python scripts/visualize_network.py
-    python scripts/visualize_network.py --fen <FEN> --frames 180
-    python scripts/visualize_network.py --layout portfolio --output-name chess-network
-    python scripts/visualize_network.py --no-mp4 --no-webm --frames 60
-"""
+"""Animate the chess CNN+LSTM forward pass as glowing nodes + synapses."""
 
 from __future__ import annotations
 

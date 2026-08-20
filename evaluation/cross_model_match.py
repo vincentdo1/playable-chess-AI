@@ -1,31 +1,12 @@
 """Play a match between two models that may live in different code branches.
 
-Each side runs in its own subprocess (move_server.py) with its own working
-directory and checkpoint, so they can use incompatible architectures or
-incompatible versions of load_model.py / neural_network.py and still play
-each other through a JSON line protocol.
+Each side runs in its own move_server.py subprocess with its own working
+directory and checkpoint, so branches with incompatible architectures or
+incompatible load_model.py / neural_network.py versions can still play each
+other over the JSON line protocol.
 
-Typical use: pit the older repo checkpoint (under a main-branch worktree)
-against your freshly trained current-architecture checkpoint (this branch).
-
-Usage example, run from this branch:
-  # 1. Create a worktree of main alongside your repo:
-  #      git worktree add ../playable-chess-ai-main main
-  #      copy any needed checkpoints into ../playable-chess-ai-main/model/
-  #      copy move_server.py into ../playable-chess-ai-main/
-  # 2. Pit them:
-  python cross_model_match.py \
-    --player_a_dir ../playable-chess-ai-main \
-    --player_a_model model/grandmaster_model_policy_v1.pt \
-    --player_a_method policy \
-    --player_b_dir . \
-    --player_b_model model/grandmaster_model_perspective_resnet_negatives_v2.pt \
-    --player_b_method mcts --player_b_sims 200 \
-    --games 10 --output cross_match.pgn
-
-The driver alternates colors so neither model gets a first-move advantage,
-reports a per-game score and a final Elo gap with a 95% CI, and optionally
-writes the games to a PGN you can view on lichess.org/paste or any GUI.
+Alternates colors, reports a per-game score and a final Elo gap with a 95% CI,
+and optionally writes the games to PGN.
 """
 
 from __future__ import annotations
