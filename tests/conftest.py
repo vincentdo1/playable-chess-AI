@@ -1,5 +1,3 @@
-"""Pytest fixtures for optional, artifact-backed audit checks."""
-
 import glob
 import os
 

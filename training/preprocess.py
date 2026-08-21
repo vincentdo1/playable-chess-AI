@@ -1,8 +1,6 @@
-"""Converts PGN files to .npz chunks for fast training. Run once before training.
+"""Convert PGN games into training chunks.
 
-Training labels come from the move actually played in the PGN. Optional
-Stockfish annotations are kept only for analysis, such as measuring how often
-the played move matched the engine's top move.
+Labels use the played move; optional Stockfish annotations support analysis.
 """
 
 import io

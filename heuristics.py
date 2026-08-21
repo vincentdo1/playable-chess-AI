@@ -2,10 +2,7 @@
 
 import chess
 
-# The piece-square / positional tables below were tuned ~10x larger than the
-# pawn-unit material values (pawn=1, knight=3.2, ...). Left unscaled they
-# outweigh material, so the search trades pieces for placement. Scale every
-# positional term down to keep material the dominant factor.
+# Keep positional tables secondary to material values measured in pawn units.
 PST_SCALE = 0.1
 
 # Middlegame piece-square tables
@@ -81,8 +78,7 @@ kingEvalWhite = (
 )
 kingEvalBlack = tuple(reversed(kingEvalWhite))
 
-# Endgame king table — king should centralize and chase pawns
-# Positive values in the center, penalize corners and edges
+# Endgame king table — centralize and chase pawns
 kingEndgameEval = (
     (-5.0, -4.0, -3.0, -2.0, -2.0, -3.0, -4.0, -5.0),
     (-4.0, -2.0,  0.0,  0.0,  0.0,  0.0, -2.0, -4.0),
@@ -107,11 +103,9 @@ def is_endgame(board: chess.Board) -> bool:
     black_minor  = (len(board.pieces(chess.BISHOP, chess.BLACK)) +
                     len(board.pieces(chess.KNIGHT, chess.BLACK)))
 
-    # No queens at all
     if white_queens == 0 and black_queens == 0:
         return True
 
-    # Both have a queen but no rooks and very little minor material
     if (white_queens <= 1 and black_queens <= 1 and
             white_rooks == 0 and black_rooks == 0 and
             white_minor <= 1 and black_minor <= 1):
@@ -123,11 +117,11 @@ def get_search_depth(board: chess.Board) -> int:
     """Deeper search in endgame (fewer pieces = smaller tree)."""
     pieces = len(board.piece_map())
     if pieces > 20:
-        return 2   # opening/middlegame — stay fast
+        return 2
     elif pieces > 10:
-        return 3   # middlegame transition
+        return 3
     else:
-        return 4   # endgame — few pieces, deeper is cheap
+        return 4
 
 # Passed pawn helpers
 
@@ -157,7 +151,7 @@ def _is_passed_pawn(board: chess.Board, square: chess.Square,
 def _passed_pawn_bonus(rank: int, color: chess.Color) -> float:
     """Bonus that scales with how far advanced the passed pawn is."""
     if color == chess.WHITE:
-        advance = rank  # rank 6 = one step from promotion
+        advance = rank
     else:
         advance = 7 - rank
     bonuses = (0.0, 0.5, 1.0, 2.0, 3.5, 5.0, 8.0, 0.0)
@@ -169,7 +163,7 @@ def _king_pawn_proximity(king_sq: chess.Square,
     kf, kr = chess.square_file(king_sq), chess.square_rank(king_sq)
     pf, pr = chess.square_file(pawn_sq), chess.square_rank(pawn_sq)
     dist   = max(abs(kf - pf), abs(kr - pr))
-    return max(0.0, 4.0 - dist)  # 4.0 adjacent, 3.0 one away, ...
+    return max(0.0, 4.0 - dist)
 
 # Main evaluation function
 

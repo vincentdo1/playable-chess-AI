@@ -1,26 +1,4 @@
-"""AlphaZero-style iteration loop: self-play, replay-buffer training, repeat.
-
-Each iteration:
-  1. The current network plays ``games_per_iteration`` self-play games. Every
-     position visited becomes a training sample whose policy target is the MCTS
-     visit distribution and whose value target is the eventual game outcome.
-  2. The new samples are added to a fixed-size replay buffer (oldest chunks
-     evicted once it overflows).
-  3. The network is trained for ``training_steps_per_iteration`` mini-batch
-     steps on uniformly-sampled positions from the buffer.
-  4. A checkpoint is saved and the next iteration begins with the updated net.
-
-What this script does *not* do (intentionally, to keep it tractable):
-  - Run self-play across multiple processes. One game at a time.
-  - Gate new checkpoints against the previous one via match play. AlphaGo Zero
-    did this; AlphaZero dropped it. We drop it too — the latest checkpoint is
-    always used for the next round of self-play.
-
-Numerical detail to keep in mind: the policy loss is the cross-entropy of the
-MCTS visit distribution against the model's softmax over *legal* moves only.
-Illegal moves are masked out of the softmax denominator before computing
-log-probabilities, matching how the network is used at inference.
-"""
+"""Run iterative self-play, replay-buffer training, and checkpoint gating."""
 
 from __future__ import annotations
 
@@ -62,16 +40,7 @@ from experiments.self_play import SelfPlayConfig, generate_self_play_games
 
 @dataclass
 class TrainingConfig:
-    """Hyperparameters for the self-play training loop.
-
-    Defaults follow the "retry recipe" after the first attempt collapsed
-    (iter20 lost 20-0 to its supervised base from catastrophic forgetting):
-      - learning_rate 1e-3 -> 1e-4 (fine-tuning a strong model)
-      - training_steps 1000 -> 100 (was ~50 effective epochs on tiny data)
-      - games_per_iteration 50 -> 200 (more fresh positions per update)
-      - supervised chunks mixed into every batch (anchors GM knowledge)
-      - per-iteration gate vs the pre-iteration weights, revert + stop on loss
-    """
+    """Self-play training hyperparameters."""
     num_iterations: int = 20
     games_per_iteration: int = 200
     replay_buffer_capacity: int = 200_000     # positions
@@ -101,15 +70,7 @@ class TrainingConfig:
 
 
 class ReplayBuffer:
-    """Chronologically-ordered chunks of self-play positions, FIFO eviction.
-
-    Positions are stored as parallel arrays inside chunks; sampling picks a
-    global flat index uniformly across all positions currently in the buffer
-    and translates it to (chunk_idx, within_chunk_idx).
-
-    The buffer is encoding-aware: board shape, move vocabulary, and whether
-    move-history arrays exist all come from the model's encoding spec.
-    """
+    """Encoding-aware FIFO buffer of self-play position arrays."""
 
     def __init__(self, capacity: int,
                  encoding_version: str = BOARD_ENCODING_VERSION):
@@ -154,15 +115,7 @@ class ReplayBuffer:
 
     def add_supervised_chunk_from_path(self, path: str,
                                        max_positions: int | None = None) -> int:
-        """Ingest a supervised chunk as one-hot 'visit' targets.
-
-        Only positive policy targets are kept (negatives have no
-        distributional meaning here). The played move gets a single visit, so
-        sampling treats it exactly like an MCTS distribution concentrated on
-        one move. Mixing these into every batch anchors the network to GM
-        play and prevents the catastrophic forgetting seen in the first
-        self-play run.
-        """
+        """Load positive supervised moves as one-hot visit targets."""
         data = np.load(path)
         self._check_chunk_encoding(data, path)
         target_type = data['policy_target_type']
@@ -229,8 +182,7 @@ class ReplayBuffer:
             if uses_history else np.zeros((batch_size, 0), dtype=np.float32)
         )
         value_target = np.empty(batch_size, dtype=np.float32)
-        # Legal moves vary in count per position; build a dense (B, V) policy
-        # target and legal mask here so the training step is simple.
+        # Expand sparse legal moves and visits into batch-wide tensors.
         policy_target = np.zeros((batch_size, vocab), dtype=np.float32)
         legal_mask = np.zeros((batch_size, vocab), dtype=bool)
 
@@ -276,11 +228,7 @@ def distribution_train_step(
     device: torch.device,
     scaler: torch.amp.GradScaler | None = None,
 ) -> dict:
-    """One gradient step with MCTS visit-distribution policy targets.
-
-    Policy loss: -sum_a target(a) * log_softmax_legal(logits)(a)
-    Value loss:  MSE between value head output and {-1, 0, +1} game outcome.
-    """
+    """Train once on visit-distribution policy targets and game outcomes."""
     model.train()
 
     non_blocking = device.type == 'cuda'
@@ -310,8 +258,6 @@ def distribution_train_step(
         policy_logits, value_pred = model(boards, move_seqs)
         masked_logits = mask_illegal_logits(policy_logits, legal_mask)
         log_probs = torch.log_softmax(masked_logits.float(), dim=1)
-        # Only positions where target > 0 contribute; that subset is the set of
-        # legal moves with non-zero MCTS visit counts.
         policy_loss = -(policy_target * log_probs).sum(dim=1).mean()
         value_loss = ((value_pred.float() - value_target) ** 2).mean()
         total = policy_loss + value_loss_weight * value_loss
@@ -330,10 +276,8 @@ def distribution_train_step(
         optimizer.step()
 
     with torch.no_grad():
-        # Top-1 agreement: argmax of model legal-softmax vs argmax of MCTS visits.
         model_top = masked_logits.argmax(dim=1)
         target_top = policy_target.argmax(dim=1)
-        # Only count rows where some target was non-zero (i.e. there were visits).
         has_target = (policy_target.sum(dim=1) > 0)
         if has_target.any():
             top1 = float(
@@ -356,16 +300,8 @@ def _snapshot_state(model) -> dict:
 
 
 def _gate_match(model, previous_state: dict, config: 'TrainingConfig') -> float:
-    """Fast policy-mode match: new weights vs pre-iteration weights.
-
-    Returns the new model's score in [0, 1] (win=1, draw=0.5). Sampling
-    temperature for the first 20 plies de-duplicates the games; after that
-    both sides play greedily.
-    """
-    # Constructors have architecture-specific defaults (v4 defaults to
-    # 256x12), so type(model)() is not a faithful clone of a custom-width or
-    # custom-depth network. Deep-copy preserves the exact architecture and all
-    # non-persistent inference attributes before swapping in prior weights.
+    """Score updated weights against their pre-iteration snapshot."""
+    # Deep-copy preserves custom widths, depths, and inference attributes.
     prev = copy.deepcopy(model).to(DEVICE)
     prev.load_state_dict(previous_state)
     prev.eval()
@@ -569,7 +505,6 @@ def run_iteration(
     iter_start = time.monotonic()
     pre_iteration_state = _snapshot_state(model)
 
-    # 1. Self-play
     sp_summary = generate_self_play_games(
         model,
         num_games=training_config.games_per_iteration,
@@ -580,11 +515,9 @@ def run_iteration(
         verbose=True,
     )
 
-    # 2. Add to buffer
     added = buffer.add_chunk_from_path(sp_summary['chunk_path'])
     buffer_size = buffer.total_positions()
 
-    # 3. Train
     train_metrics: list[dict] = []
     train_start = time.monotonic()
     supervised_per_batch = 0
@@ -624,9 +557,7 @@ def run_iteration(
                 )
     train_elapsed = time.monotonic() - train_start
 
-    # 4. Gate: the updated weights must hold their own against the
-    # pre-iteration weights, otherwise revert and stop the run. This is the
-    # guard against the catastrophic forgetting that sank the first attempt.
+    # Revert updates that fail the match-play gate.
     gate = None
     if training_config.gate_games > 0 and train_metrics:
         gate_start = time.monotonic()
@@ -647,7 +578,7 @@ def run_iteration(
             model.load_state_dict(pre_iteration_state)
             model.to(DEVICE)
 
-    # 5. Checkpoint (only weights that passed the gate are written)
+    # Save only weights that passed the gate.
     ckpt_path = os.path.join(
         training_config.checkpoint_dir,
         f'selfplay_iter{iteration:04d}.pt',
@@ -740,10 +671,7 @@ def run_loop(
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-    # Resume safety: when continuing from a later iteration without an explicit
-    # init checkpoint, load the *previous* iteration's self-play checkpoint
-    # rather than silently falling back to the supervised model (which would
-    # throw away all self-play progress and overwrite the iteration files).
+    # Later iterations resume from the immediately preceding checkpoint.
     resume_ckpt = None
     if start_iteration > 1 and not training_config.init_checkpoint:
         resume_ckpt = os.path.join(
@@ -846,10 +774,7 @@ def run_loop(
         print(f"Supervised anchor buffer: {loaded:,} positions "
               f"({training_config.supervised_fraction:.0%} of each batch)")
         if loaded == 0:
-            # Training without the anchor is the exact catastrophic-forgetting
-            # setup that sank the first self-play run, so an empty anchor is
-            # a configuration error (usually an encoding mismatch between the
-            # bootstrap checkpoint and --supervised_dirs), never a warning.
+            # An explicitly configured anchor must contribute matching rows.
             raise RuntimeError(
                 f"Supervised anchor dirs {training_config.supervised_dirs!r} "
                 f"contributed 0 positions for encoding {encoding_version!r}. "

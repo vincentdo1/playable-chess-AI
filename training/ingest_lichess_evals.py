@@ -1,24 +1,8 @@
-"""Build v4 distillation shards from the Lichess position-evaluations dump.
+"""Build v4 distillation shards from Lichess position evaluations.
 
-Source: https://huggingface.co/datasets/Lichess/chess-position-evaluations
-(mirror of https://database.lichess.org/ evaluations; CC0). Raw schema per row:
-fen, line (PV, UCI), depth, knodes, cp, mate.
-
-Sign convention (verified empirically on shard 0, 2026-07-02 — see
-tests/distill_ingest_test.py): **cp and mate are from White's point of view.**
-This tool converts them to the side-to-move convention used everywhere in this
-repo (value_target = tanh(cp_stm / 600), mate -> +/-1) so downstream code never
-sees the White-POV numbers.
-
-Output: compact parquet shards with columns (fen, move, value_target, depth) —
-board tensors are intentionally NOT materialized; the training DataLoader
-encodes FENs on the fly with the audited v3 codecs (docs/ROADMAP_2500.md WS1).
-Deduplication keeps the deepest evaluation per unique FEN. Validation rows come
-exclusively from hash-bucket 0, so train/val never share a position.
-
-Usage:
-  python -m training.ingest_lichess_evals --num_shards 3 \
-      --source_revision <immutable-hugging-face-commit-sha>
+Source evaluations use White's perspective and are converted to side-to-move
+values. Output rows contain FEN, move, value target, and depth; deduplication
+keeps the deepest evaluation per FEN and hash buckets separate train/validation.
 """
 
 from __future__ import annotations
@@ -41,9 +25,8 @@ import pyarrow.parquet as pq
 
 from training.preprocess import VALUE_CP_SCALE  # 600, shared with v2/v3 labels
 
-# King-takes-rook castling notation used by Lichess PVs; anything else in the
-# move column is already standard UCI. (Rook e1->h1 moves also match these
-# strings, which is why normalization goes through parse_uci per row.)
+# Candidate Lichess king-takes-rook castling moves; parse_uci disambiguates
+# ordinary rook moves with the same coordinates.
 _CASTLE_UCI_CANDIDATES = frozenset(('e1h1', 'e1a1', 'e8h8', 'e8a8'))
 
 HF_DATASET = 'Lichess/chess-position-evaluations'
@@ -122,9 +105,7 @@ def _download_shard(raw_dir: str, index: int,
     provenance_path = path + '.source.json'
     url = HF_SHARD_URL.format(revision=source_revision, index=index)
 
-    # A filename alone cannot prove which moving dataset revision produced it.
-    # Reuse only a cache whose sidecar pins the same URL/revision and whose
-    # content still matches the recorded digest.
+    # Reuse only cache entries with matching revision and digest metadata.
     if os.path.exists(path) and os.path.exists(provenance_path):
         try:
             with open(provenance_path, encoding='utf-8') as f:
@@ -225,9 +206,7 @@ def partition_shard(raw_path: str, tmp_dir: str, num_buckets: int,
             value = -white_value if black_to_move else white_value
             move = line.split(' ', 1)[0]
             if move in _CASTLE_UCI_CANDIDATES:
-                # Lichess PVs encode castling as king-takes-rook (e1h1);
-                # normalize to standard UCI so consumers can stay strict.
-                # Board construction only for these ~1.5% of rows.
+                # Normalize Lichess castling notation through the source FEN.
                 try:
                     move = chess.Board(fen).parse_uci(move).uci()
                 except (ValueError, KeyError):
@@ -308,9 +287,7 @@ def dedupe_and_emit(tmp_dir: str, out_dir: str, num_buckets: int,
                 prev = best.get(fen)
                 if prev is None or depth > prev[2]:
                     best[fen] = (move, value, depth)
-        # Free the bucket's temp space immediately: at full-dump scale the
-        # temp partition is ~14 GB, and reclaiming it bucket-by-bucket keeps
-        # peak disk usage roughly flat while the output grows.
+        # Reclaim each bucket's temporary partition before processing the next.
         for path in part_paths:
             os.remove(path)
         rows = [(fen, m, v, d) for fen, (m, v, d) in best.items()]

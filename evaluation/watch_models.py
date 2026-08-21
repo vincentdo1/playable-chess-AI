@@ -1,26 +1,6 @@
-"""Watch two trained checkpoints play each other in a Pygame window.
+"""Watch two compatible checkpoints play in a Pygame window.
 
-Reuses the existing board/piece art under pieces/ (same look as main.py), but
-loads TWO separate model checkpoints so you can pit e.g. the supervised base
-against a self-play iteration, or any two current-architecture checkpoints.
-
-Each side can move via the raw policy head (instant) or MCTS (stronger,
-more tactical, a few seconds per move). Moves are computed on a background
-thread so the window stays responsive while a model thinks. The window title
-shows whose turn it is / who is thinking / the final result; moves and the
-result are also printed to the console.
-
-Controls:  SPACE pause/resume   R restart   ESC/Q quit
-
-Run from the repo root with your venv active, e.g.:
-
-  python watch_models.py ^
-    --white_model model/grandmaster_model_perspective_resnet_negatives_v2.pt ^
-    --black_model model/selfplay_checkpoints/selfplay_iter0001.pt ^
-    --white_method mcts --black_method mcts --sims 200 --delay 0.4
-
-(both checkpoints must use the current architecture; for an old-architecture
-checkpoint on another branch, use the headless cross_model_match.py instead.)
+Controls: SPACE pause/resume, R restart, ESC/Q quit.
 """
 
 from __future__ import annotations
@@ -97,13 +77,11 @@ class Arena:
         self.delay = args.delay
         self.max_plies = args.max_plies
 
-        # Board background (reuse pieces/board.png like main.py).
         image = Image.open('pieces/board.png').resize((self.size, self.size))
         self.board_img = pygame.image.fromstring(
             image.tobytes(), image.size, image.mode,
         )
 
-        # Cache scaled piece sprites: key = symbol like 'P_w'.
         self._piece_cache: dict[str, pygame.Surface] = {}
 
         from load_model import load_trained_model

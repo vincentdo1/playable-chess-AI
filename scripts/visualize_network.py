@@ -1,11 +1,4 @@
-"""Animate the chess CNN+LSTM forward pass as glowing nodes + synapses.
-
-Usage:
-    python scripts/visualize_network.py
-    python scripts/visualize_network.py --fen <FEN> --frames 180
-    python scripts/visualize_network.py --layout portfolio --output-name chess-network
-    python scripts/visualize_network.py --no-mp4 --no-webm --frames 60
-"""
+"""Animate the chess CNN+LSTM forward pass as glowing nodes + synapses."""
 
 from __future__ import annotations
 
@@ -153,9 +146,6 @@ class LayoutConfig:
 
 LAYOUTS: dict[str, LayoutConfig] = {
     'full': LayoutConfig(name='full'),
-    # Portfolio cards add their own title, badges, and gradient treatment.
-    # Keep this export focused on the moving network so it does not fight
-    # the card chrome or make the chess board look cramped.
     'card': LayoutConfig(
         name='card',
         show_title=False,
@@ -166,9 +156,6 @@ LAYOUTS: dict[str, LayoutConfig] = {
         layer_y_low=0.18,
         layer_y_high=0.82,
     ),
-    # Tailored for vincent-portfolio's featured project card:
-    # top corners have metadata labels and the bottom band carries the
-    # large project title, so keep the network in the card's open field.
     'portfolio': LayoutConfig(
         name='portfolio',
         show_title=False,
@@ -249,8 +236,7 @@ def build_layer_specs(captures: dict[str, torch.Tensor],
     init_idx, init_sel = _topk_abs(init_l2, MAX_NODES_PER_COLUMN)
     layers.append(LayerSpec('initial_conv', 'conv', _normalize(init_sel)))
 
-    # Reuse init_idx across residual blocks so the same "neuron channels"
-    # carry through the tower - synapses then read as coherent vertical streams.
+    # Track the same channels through residual blocks.
     for i, key in enumerate(sorted(k for k in captures if k.startswith('res_'))):
         block_means = captures[key].numpy()[0].mean(axis=(1, 2))
         layers.append(LayerSpec(
@@ -421,7 +407,7 @@ def draw_static_chrome(ax, board: chess.Board, used_random_init: bool,
                 fontsize=7, family='sans-serif', alpha=0.85)
 
     if layout.show_board:
-        # Board extent kept square by mapping x span through the canvas aspect.
+        # Preserve the board's aspect ratio.
         board_img = render_board_image(board, size_px=256)
         x0_b, x1_b = layout.board_x0, layout.board_x1
         y_height = (x1_b - x0_b) * (width / height)

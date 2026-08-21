@@ -1,21 +1,4 @@
-"""Audit-grade validation of the v4 distillation dataset.
-
-Standalone runnable:  python tests/distill_ingest_test.py
-
-The 2026-07-02 probe on raw shard 0 established that the Lichess dump's
-cp/mate are WHITE-POV (mate=+1 with black to move was never a black mate,
-0/150; mate=-1 with black to move always was, 150/150). Ingestion converts to
-this repo's side-to-move convention. This test re-verifies the *output*:
-
-  1. every sampled row's move is legal in its FEN (policy labels sound);
-  2. value_target is in [-1, 1] and mate rows sit exactly at +/-1;
-  3. INDEPENDENT sign check: local Stockfish evaluates sampled positions from
-     the side to move; the stored value_target must agree in sign for
-     decisively evaluated rows and correlate strongly overall. An inverted
-     convention cannot pass this.
-  4. if a raw shard is still on disk, the mate-in-1 probe from the original
-     verification is repeated against it.
-"""
+"""Validate distillation labels, values, and side-to-move signs."""
 
 import glob
 import os
@@ -59,11 +42,7 @@ def _sample_rows(rng):
 
 
 def test_labels_and_range(rows):
-    """Strict label check: the stored move must survive the exact path the
-    trainer uses (parse_uci + policy index inside the recomputed legal set).
-    `in board.legal_moves` is NOT strict enough — python-chess silently
-    normalizes Lichess's king-takes-rook castling UCI (e1h1), which is how
-    1.55% skipped-castling rows evaded the first version of this test."""
+    """Validate labels through parse_uci and the production policy codec."""
     from neural_network import legal_policy_indices_v3, move_to_policy_index_v3
 
     mates = 0
@@ -171,8 +150,7 @@ _SYNTH_ROWS = [
     # Black castles queenside.
     ('r3kbnr/pppqpppp/2n5/3p1b2/3P1B2/2N5/PPPQPPPP/R3KBNR b KQkq - 6 5',
      'e8a8 e1a1', 25, -20, None),
-    # Rook lift e1->h1 that merely LOOKS like castle notation; must survive
-    # (king NOT on e1, so no castling conversion may fire).
+    # Ordinary rook move sharing castling coordinates.
     ('6k1/8/8/8/8/8/8/3KR3 w - - 10 20',
      'e1h1 g8f7', 25, 10, None),
     # Black to move, White better by 150cp (White-POV) -> negative STM value.
@@ -248,8 +226,6 @@ def test_ingest_unit_castling_conversion_dedupe():
         # Dedupe kept the depth-30 row.
         assert out[_SYNTH_ROWS[6][0]][0] == 'e7e5'
 
-        # And the trainer's dataset must consume every emitted row (the old
-        # reader skipped castling rows; parse_uci fixed that).
         from training.train_distill import DistillShardDataset
         from neural_network import policy_index_to_move_v3
         ds = DistillShardDataset(
@@ -282,8 +258,7 @@ def test_reader_skip_rate_on_real_data():
         if yielded >= limit:
             break
     table_rows = pq.ParquetFile(path).metadata.num_rows
-    # The iterator stops at `limit`, so reaching it means <(rows-limit) were
-    # skipped before that point; assert we got the full stream prefix.
+    # Reaching the limit verifies that the full stream prefix was readable.
     assert yielded == min(limit, table_rows), (
         f'reader yielded {yielded} of first {limit}'
     )

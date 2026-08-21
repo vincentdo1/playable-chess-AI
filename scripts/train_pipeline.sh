@@ -1,41 +1,22 @@
 #!/usr/bin/env bash
-#
-# Full training pipeline: GM supervised pretraining -> AlphaZero self-play.
-#
-# Stage 1  preprocess GM PGNs -> train/val/test .npz chunks
-# Stage 2  supervised-train the CURRENT architecture on those chunks -> $MODEL_PATH
-# Stage 3  self-play from $MODEL_PATH, improving policy+value via MCTS
-#
-# Defaults target the v3 architecture/encoding (data/*_chunks_v3,
-# model/grandmaster_resnet_v3.pt). Set ARCH_VERSION=v2 plus matching
-# TRAIN_DIR/VAL_DIR/MODEL_PATH to rebuild the legacy model instead.
-#
-# Run on a GPU box. Each stage is resumable: comment out earlier stages once done.
-#
-# Usage:
-#   ./train_pipeline.sh                 # full run with defaults
-#   STOCKFISH_PATH=/usr/bin/stockfish ./train_pipeline.sh   # better value targets
-#   SKIP_PREPROCESS=1 ./train_pipeline.sh                   # reuse existing chunks
-#   REQUIRE_CUDA=0 ./train_pipeline.sh                      # CPU smoke test only
-#
+# GM preprocessing, supervised training, and AlphaZero self-play.
+# Defaults use the v3 encoding and model paths. Override ARCH_VERSION and the
+# data/model environment variables for legacy training.
 set -euo pipefail
 
-# --- Shared config -----------------------------------------------------------
+# Configuration
 export TRAIN_DIR="${TRAIN_DIR:-data/train_chunks_v3}"
 export VAL_DIR="${VAL_DIR:-data/val_chunks_v3}"
 export TEST_DIR="${TEST_DIR:-data/test_chunks_v3}"
-# The current-architecture base model that self-play will bootstrap from.
 export MODEL_PATH="${MODEL_PATH:-model/grandmaster_resnet_v3.pt}"
 
-# Supervised training hyperparameters (env-read by neural_network.py).
 export EPOCHS="${EPOCHS:-50}"
 export BATCH_SIZE="${BATCH_SIZE:-512}"
 export RESIDUAL_FILTERS="${RESIDUAL_FILTERS:-128}"
 export RESIDUAL_BLOCKS="${RESIDUAL_BLOCKS:-8}"
 export TRAIN_LOG_INTERVAL="${TRAIN_LOG_INTERVAL:-100}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
-# Full training on CPU looks like a hang. Keep this on unless you are doing a
-# deliberately tiny CPU smoke test with MAX_TRAIN_BATCHES/MAX_VAL_BATCHES.
+# Disable only for a bounded CPU smoke test.
 export REQUIRE_CUDA="${REQUIRE_CUDA:-1}"
 
 if [ -z "${PYTHON:-}" ]; then
@@ -57,10 +38,7 @@ if [ "${SKIP_ENV_CHECK:-0}" != "1" ]; then
   $PYTHON -m training.check_training_env
 fi
 
-# --- Stage 1: preprocess -----------------------------------------------------
-# If a real Stockfish binary is on STOCKFISH_PATH, value targets come from engine
-# evals and bad-move negatives are mined. Otherwise pass --no_cp_loss to fall back
-# to game-result value targets (which happen to match self-play's value convention).
+# Preprocess
 if [ "${SKIP_PREPROCESS:-0}" != "1" ]; then
   echo "=== Stage 1/3: preprocessing GM PGNs -> chunks ==="
   PREPROCESS_FLAGS="${PREPROCESS_FLAGS:-}"
@@ -73,7 +51,7 @@ else
   echo "=== Stage 1/3: SKIPPED (SKIP_PREPROCESS=1) ==="
 fi
 
-# --- Stage 2: supervised pretraining ----------------------------------------
+# Supervised pretraining
 if [ "${SKIP_SUPERVISED:-0}" != "1" ]; then
   echo "=== Stage 2/3: supervised pretraining current architecture -> $MODEL_PATH ==="
   $PYTHON neural_network.py
@@ -81,9 +59,7 @@ else
   echo "=== Stage 2/3: SKIPPED (SKIP_SUPERVISED=1) ==="
 fi
 
-# --- Stage 3: self-play ------------------------------------------------------
-# Defaults follow train_self_play's retry recipe (LR 1e-4, 100 steps/iter,
-# 200 games/iter, supervised anchor mixed in, per-iteration gate).
+# Self-play
 echo "=== Stage 3/3: AlphaZero self-play from $MODEL_PATH ==="
 $PYTHON -m experiments.train_self_play \
   --init_checkpoint "$MODEL_PATH" \

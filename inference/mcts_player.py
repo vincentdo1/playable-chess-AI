@@ -1,23 +1,4 @@
-"""MCTS/PUCT search using the trained network as policy prior and value evaluator.
-
-AlphaZero-style inference search:
-  - Policy head supplies the prior P(s, a) for each child move.
-  - Value head supplies V(s) at newly-expanded leaves.
-  - Tree descent uses PUCT:
-        argmax_a [ -Q_child(s, a) + c_puct * P(s, a) * sqrt(N(s)) / (1 + N(s, a)) ]
-    Q is negated because the child stores its own side-to-move's value, and the
-    parent picks the move that's worst for the opponent.
-  - Leaves are collected into batches and evaluated in one forward pass.
-    Virtual loss penalises in-flight paths so parallel descents diverge.
-
-The trained network's policy was learned one-hot from GM moves, so its
-distribution over legal moves is very peaky. PUCT priors need to be a real
-distribution for the U term to do useful exploration — so we apply a softening
-temperature (default 1.5) to the logits before softmax. The value head is used
-as trained.
-
-Public entry point: ``mcts_search_best_move(model, board, ...)``.
-"""
+"""Batched MCTS/PUCT using network policy priors and leaf values."""
 
 from __future__ import annotations
 
@@ -76,14 +57,7 @@ class MCTSNode:
         return self.visit_count + self.virtual_loss
 
     def q_value(self) -> float:
-        """Mean value from this node's side-to-move POV, biased by virtual loss.
-
-        Virtual loss is ADDED here (not subtracted) on purpose: selection reads
-        this through negation (`-child.q_value()`), so inflating the child's own
-        value makes the move look *worse to the parent*. That is what steers
-        concurrent descents in a batch onto different paths. Subtracting would
-        invert the penalty and collapse the batch onto one path.
-        """
+        """Mean side-to-move value, with virtual loss added before parent negation."""
         n = self.total_n()
         if n == 0:
             return 0.0
@@ -212,9 +186,7 @@ def _batched_eval(model: ChessModel, boards: list[chess.Board]):
 def _descend_to_leaf(root: MCTSNode, root_board: chess.Board, c_puct: float):
     """Walk down with PUCT, applying virtual loss. Returns (leaf, leaf_board, path, depth)."""
     node = root
-    # Preserve the full reversible history. v2 consumes only the final ten
-    # moves, but v3 repetition features and terminal draw detection cannot be
-    # reconstructed soundly from an arbitrary fixed-length tail.
+    # Keep full history for repetition features and terminal draw detection.
     board = root_board.copy(stack=True)
     path = [node]
     node.virtual_loss += 1
@@ -261,7 +233,6 @@ def mcts_search(
 
     move_to_index = _model_spec(model)['move_to_index']
 
-    # Pre-expand root.
     policies, values = _batched_eval(model, [root_board])
     stats.nn_batches += 1
     stats.nn_evals += 1
@@ -319,7 +290,6 @@ def mcts_search(
 
         if not pending:
             if attempts >= max_attempts and sims_done < num_simulations:
-                # All descents resolved as terminals this round; loop continues.
                 continue
             break
 

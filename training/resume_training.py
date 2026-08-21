@@ -1,44 +1,6 @@
-"""Resume/extend supervised training from an existing checkpoint, safely.
+"""Resume supervised training and save only validation improvements.
 
-Why this exists
----------------
-The base model `grandmaster_model_perspective_resnet_negatives_v2.pt` stopped
-improving at epoch 6 (val_loss=1.832) and early-stopping killed the run at
-epoch ~11. Inspection of neural_network.py shows the likely cause is a schedule
-conflict, not true convergence:
-
-  * ReduceLROnPlateau(factor=0.5, patience=3) only halved the LR once before
-  * EARLY_STOP_PATIENCE=5 terminated the run two epochs later.
-
-So the reduced learning rate never had time to take effect. This script resumes
-from the saved checkpoint with a gentler, non-self-sabotaging schedule and more
-patience, to squeeze out the improvement that was left on the table.
-
-Safety guarantees (so the result is never worse than what you have now)
-----------------------------------------------------------------------
-1. Reads the loaded checkpoint's recorded val_loss and seeds best_val_loss with
-   it, so a new checkpoint is ONLY written when it genuinely beats the current
-   model on validation. The current model can never be regressed by this run.
-2. Writes to a SEPARATE --output path. The input checkpoint file is never
-   touched, so your deployed model is safe no matter what happens.
-3. Re-validates the loaded weights up front and prints that baseline val_loss,
-   so you can confirm the resume actually started from your model (sanity check
-   against silently training from random init).
-
-It reuses neural_network.py's dataset, collate, model, loss and per-epoch
-train/eval functions verbatim, so the math matches the original training
-exactly. Only the optimizer/scheduler/early-stop policy and the checkpoint
-gating differ.
-
-Usage (PowerShell, venv active, run from repo root):
-  $env:TRAIN_DIR = "data/train_chunks"
-  $env:VAL_DIR   = "data/val_chunks"
-  python resume_training.py `
-    --init model/grandmaster_model_perspective_resnet_negatives_v2.pt `
-    --output model/grandmaster_resnet_v2_resumed.pt `
-    --epochs 40 --lr 3e-4 --early_stop_patience 10 --lr_patience 4
-
-Then compare the two with eval_arena.py before deploying the new one.
+The source checkpoint is revalidated and never overwritten.
 """
 
 from __future__ import annotations
@@ -48,9 +10,7 @@ import os
 import sys
 import time
 
-# Force line-buffered stdout/stderr so `Tee-Object` / `tail -f` show progress in
-# real time even when the user forgets PYTHONUNBUFFERED=1. Belt-and-suspenders
-# with the flush=True we use on key prints below.
+# Keep progress visible through Tee-Object and tail.
 try:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
@@ -134,8 +94,7 @@ def main() -> int:
         os.makedirs(out_dir, exist_ok=True)
 
     device = N.DEVICE
-    # Use the patched neural_network preflight if present (REQUIRE_CUDA guard +
-    # device banner). Guarded so this still runs against an unpatched copy.
+    # Run the shared device preflight when available.
     if hasattr(N, 'assert_training_device'):
         N.assert_training_device()
     if hasattr(N, 'print_device_info'):
@@ -146,7 +105,6 @@ def main() -> int:
         print("  WARNING: not on CUDA; full-dataset training will be very slow.",
               flush=True)
 
-    # --- Load checkpoint (weights + recorded val_loss) ---
     if not os.path.exists(args.init):
         raise SystemExit(f"--init checkpoint not found: {args.init}")
     checkpoint = torch.load(args.init, map_location=device, weights_only=False)
@@ -165,8 +123,7 @@ def main() -> int:
     if skipped:
         print(f"  Skipped incompatible tensors: {skipped}")
     if load_result.missing_keys or skipped:
-        # If big chunks of the net are randomly initialized, resuming is not
-        # actually resuming. Refuse rather than silently train from rubble.
+        # Reject partial checkpoint loads.
         raise SystemExit(
             "Checkpoint does not fully match the current architecture; aborting "
             "so we do not accidentally train from partial/random weights."
@@ -188,7 +145,6 @@ def main() -> int:
     )
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
 
-    # --- Baseline: re-validate the loaded weights so we KNOW our starting point ---
     print("\nRe-validating loaded weights to establish the baseline...")
     baseline = N.evaluate(model, val_loader, value_criterion, device,
                           max_batches=N.MAX_VAL_BATCHES)
@@ -196,7 +152,7 @@ def main() -> int:
     print(f"  Baseline val_loss (recomputed): {baseline_val:.4f}  "
           f"move_acc={baseline['move_acc']:.4f}")
 
-    # Gate against the BETTER of recorded and recomputed, so we never regress.
+    # Compare against the better recorded or recomputed baseline.
     best_val_loss = baseline_val
     if recorded_val is not None:
         best_val_loss = min(best_val_loss, float(recorded_val))

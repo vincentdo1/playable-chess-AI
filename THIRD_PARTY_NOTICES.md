@@ -1,36 +1,23 @@
-# Third-party notices and unresolved provenance
+# Third-party notices
 
-This file is an inventory, not a license for this repository's original code
-or model weights. The project owner must choose those licenses separately.
+## Stockfish
 
-## Stockfish JavaScript/WebAssembly
+`stockfish.js` is derived from Stockfish and
+[niklasf/stockfish.js](https://github.com/niklasf/stockfish.js), which are
+distributed under GPLv3. The exact source revision and build recipe for the
+checked-in file are not recorded.
 
-`stockfish.js` identifies itself as a build derived from Stockfish and
-`niklasf/stockfish.js`, released under GNU GPL v3. Preserve its embedded
-copyright header. Before distributing a release, identify the exact upstream
-source revision/build, include the applicable GPL license text, and make the
-corresponding source available as required by that license.
+When redistributing it, preserve its notices, include the GPLv3 license, and
+provide the corresponding source as the license requires.
 
-- Upstream named in the file: https://github.com/niklasf/stockfish.js
-- Stockfish: https://github.com/official-stockfish/Stockfish
+## Training data
 
-The repository does not currently record the exact revision or build recipe
-for the checked-in generated file, so this inventory does not establish full
-license compliance.
-
-## Lichess position evaluations
-
-The v4 ingestion pipeline reads
-`Lichess/chess-position-evaluations` from Hugging Face. The dataset page labels
-the dataset CC0. Every reproducible run must retain the exact dataset revision
-and source-shard hashes; historical v4 training did not do so.
-
-- Dataset: https://huggingface.co/datasets/Lichess/chess-position-evaluations
-- Lichess database exports: https://database.lichess.org/
+The v4 pipeline reads the
+[Lichess chess-position-evaluations dataset](https://huggingface.co/datasets/Lichess/chess-position-evaluations),
+whose dataset page lists it as CC0. Training data and model weights are not
+included in this repository.
 
 ## Visual assets
 
-The repository contains chess-piece images and generated network media without
-a committed source/license manifest. Record their authors, source revisions,
-and redistribution terms before treating a public release as provenance
-complete.
+The repository does not currently include source or license information for
+the chess-piece images, board image, font, or generated network animation.

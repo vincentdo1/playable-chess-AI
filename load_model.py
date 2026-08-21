@@ -47,27 +47,12 @@ def _validate_hf_revision(revision: str | None) -> str | None:
 
 
 def _maybe_fetch_from_hf(path: str) -> str:
-    """Return a local path to the checkpoint, downloading it from a Hugging
-    Face model repo if `path` is missing and MAGNUS_HF_REPO is set.
-
-    This is how the Railway/container deploy gets the git-ignored .pt: the
-    weights live in an HF model repo and are pulled on first boot into the HF
-    cache. Local dev is unaffected -- if the file already exists we never touch
-    the network or import huggingface_hub.
-
-    Env:
-      MAGNUS_HF_REPO      repo id, e.g. "vincentdo/magnus-chess-v4" (required)
-      MAGNUS_HF_FILENAME  file in the repo (default: basename of `path`)
-      MAGNUS_HF_REVISION  immutable commit SHA (required by default)
-      HF_TOKEN            only for a private repo
-
-    Set MAGNUS_ALLOW_FLOATING_HF_REVISION=1 only for local experimentation.
-    """
+    """Download a missing checkpoint when a Hugging Face repo is configured."""
     if os.path.exists(path):
         return path
     repo_id = os.environ.get('MAGNUS_HF_REPO')
     if not repo_id:
-        return path  # let the caller raise the normal FileNotFoundError
+        return path
     filename = os.environ.get('MAGNUS_HF_FILENAME', os.path.basename(path))
     revision = os.environ.get('MAGNUS_HF_REVISION') or None
     allow_floating = _env_flag(
@@ -83,7 +68,7 @@ def _maybe_fetch_from_hf(path: str) -> str:
             )
         revision = _validate_hf_revision(revision)
     token = os.environ.get('HF_TOKEN') or None
-    from huggingface_hub import hf_hub_download  # lazy: only needed to download
+    from huggingface_hub import hf_hub_download
     print(f"Model {path!r} not found locally; fetching {filename!r} from "
           f"Hugging Face repo {repo_id!r}...")
     local_path = hf_hub_download(
@@ -127,16 +112,12 @@ def load_trained_model(path: str = MODEL_PATH) -> ChessModel:
                 f'{expected_sha256}, got {checkpoint_sha256}'
             )
 
-    # Explicit safe loading avoids the arbitrary-code-capable pickle behavior
-    # used by older PyTorch defaults. Project checkpoints contain only tensors
-    # and primitive metadata, all supported by weights_only=True.
+    # weights_only rejects executable pickle data; checkpoints contain tensors
+    # and primitive metadata.
     checkpoint = torch.load(path, map_location=DEVICE, weights_only=True)
     if not isinstance(checkpoint, dict) or 'model_state_dict' not in checkpoint:
         raise ValueError(f'Checkpoint {path!r} has no model_state_dict')
-    # All generations stay servable. arch_version picks the architecture
-    # (v4 SE-ResNet shares the v3 board encoding, so encoding alone is not
-    # enough); older checkpoints without arch_version fall back to the
-    # stored board encoding (v2 ResNet+LSTM or v3 conv-head ResNet).
+    # Legacy checkpoints without arch_version fall back to their board encoding.
     checkpoint_encoding = checkpoint.get('board_encoding') or BOARD_ENCODING_VERSION
     arch_version = checkpoint.get('arch_version')
     if arch_version not in {None, 'v2', 'v3', 'v4'}:
@@ -152,9 +133,7 @@ def load_trained_model(path: str = MODEL_PATH) -> ChessModel:
             f'{expected_encoding!r}, got {checkpoint_encoding!r}.'
         )
 
-    # Pre-metadata v2/v3 checkpoints never recorded their dimensions; those
-    # were whatever the RESIDUAL_FILTERS/RESIDUAL_BLOCKS env knobs said at
-    # training time, so the same knobs (not hardcoded 128x8) are the fallback.
+    # Pre-metadata v2/v3 checkpoints rely on the training-time dimension settings.
     filters = _checkpoint_dimension(
         checkpoint, 'residual_filters',
         256 if arch_version == 'v4' else RESIDUAL_FILTERS,
@@ -188,11 +167,7 @@ def load_trained_model(path: str = MODEL_PATH) -> ChessModel:
             "This usually means the checkpoint was trained before the "
             "perspective/residual architecture change."
         ) from exc
-    # A missing tensor means that layer would be served with random init.
-    # The one legitimate case is an old policy-only checkpoint with no value
-    # head at all — that loads with value reranking disabled. Anything else
-    # (a partial/corrupt file, an architecture drift) must fail loudly
-    # instead of silently playing with a partially random network.
+    # Only legacy policy-only checkpoints may omit the entire value head.
     missing_value_head = [
         key for key in load_result.missing_keys
         if key.startswith('value_head')
@@ -230,10 +205,7 @@ def load_trained_model(path: str = MODEL_PATH) -> ChessModel:
         os.environ.get('MAGNUS_HF_REVISION') if used_hf_download else None
     )
 
-    # Loading weights is not enough to prove the serving contract is usable.
-    # Run one cheap forward pass with the checkpoint-selected encoding before
-    # readiness can turn green; channel/vocabulary drift then fails at startup
-    # instead of on the first user request.
+    # Validate the checkpoint-selected serving contract before reporting readiness.
     spec = model.encoding_spec
     board_probe = torch.zeros(
         1, spec['board_channels'], 8, 8, device=DEVICE
@@ -278,12 +250,7 @@ def _model_encoding(model) -> str:
 
 def _position_arrays(board: chess.Board,
                      encoding_version: str = BOARD_ENCODING_VERSION):
-    """Board (+ history for v2) arrays for one position.
-
-    v3 returns None for the move-history array: that architecture is
-    board-only, which also removes the v2 train/serve skew where FEN-built
-    boards had no move stack to feed the LSTM.
-    """
+    """Return board input and optional v2 move history for one position."""
     is_black = (board.turn == chess.BLACK)
     if encoding_version == BOARD_ENCODING_VERSION_V3:
         return board_to_tensor_v3(board, flip=is_black), None
@@ -375,12 +342,7 @@ def _value_scores_after_moves(model: ChessModel, board: chess.Board, moves):
 def _get_move_scores(model: ChessModel, board: chess.Board,
                      value_weight: float = DEFAULT_VALUE_WEIGHT,
                      value_candidate_limit: int | None = DEFAULT_VALUE_CANDIDATES):
-    """
-    Run the neural network and return a score for every legal move.
-
-    Returns a list of (score, move) tuples sorted highest score first.
-    Scores combine legal move policy with resulting-position value.
-    """
+    """Return legal moves ranked by policy and resulting-position value."""
     legal_moves = list(board.legal_moves)
     if not legal_moves:
         return []
@@ -438,18 +400,10 @@ def predict_next_move(model: ChessModel, board: chess.Board,
                       blunder_guard_depth: int = 2,
                       blunder_guard_margin_cp: float = 150.0,
                       ) -> str | None:
-    """
-    Pure neural network prediction with policy+value scoring.
+    """Choose a legal move from policy scores and optional value reranking.
 
-    temperature controls variety:
-      0.0 = always pick the single best move (greedy)
-      1.2 = natural variety while still preferring confident moves
-      2.0 = very exploratory
-
-    value_weight controls how strongly resulting-position value reranks moves.
-    value_candidate_limit=0 or None evaluates every legal move with the value head.
-    blunder_guard shallow-searches the top candidates and vetoes ones that
-    lose material (inference/blunder_guard.py).
+    A zero temperature is deterministic. ``value_candidate_limit`` limits
+    value-head evaluation; zero or ``None`` evaluates every legal move.
     """
     legal_moves = list(board.legal_moves)
     if not legal_moves:
@@ -475,7 +429,7 @@ def predict_next_move(model: ChessModel, board: chess.Board,
         return moves[0].uci()
 
     log_scores = log_scores / temperature
-    log_scores -= log_scores.max()   # subtract max for stability
+    log_scores -= log_scores.max()
     probs = np.exp(log_scores)
     probs /= probs.sum()
 

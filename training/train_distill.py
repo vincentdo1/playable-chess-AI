@@ -1,19 +1,7 @@
-"""Phase-1 distillation trainer: v4 SE-ResNet on Lichess-eval shards.
+"""Train ChessModelV4 on Lichess evaluation shards.
 
-Trains ChessModelV4 on the compact (fen, move, value_target, depth) shards
-built by training/ingest_lichess_evals.py. Board tensors and legal masks are
-computed on the fly in DataLoader workers with the audited v3 codecs. The
-source's four-field FENs cannot supervise halfmove/repetition state, so
-ChessModelV4 masks those auxiliary channels at both training and serving time
-(docs/ROADMAP_2500.md WS1/WS2).
-
-Checkpoints store arch_version='v4' (+ filters/blocks), which
-load_model.load_trained_model dispatches on; the board encoding remains
-'perspective_v3'.
-
-Usage (defaults = Phase-1 recipe):
-  python -m training.train_distill                # 3 epochs over data/distill_chunks_v4
-  python -m training.train_distill --resume model/grandmaster_resnet_v4_distill.pt
+Four-field source FENs cannot supervise clock or repetition planes, so v4
+masks those inputs. Checkpoints retain the ``perspective_v3`` board encoding.
 """
 
 from __future__ import annotations
@@ -30,10 +18,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-# pyarrow MUST be imported before torch: with torch 2.6 + pyarrow 24 on
-# Windows the reverse order segfaults on first parquet access (DLL clash).
-# DataLoader spawn workers re-import this module, so keeping the order here
-# protects them too.
+# Import pyarrow before torch to avoid a Windows DLL crash in worker processes.
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -42,9 +27,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, IterableDataset
 
-# Distilled value labels are dense engine evals, so the value head deserves
-# more weight than the 0.25 used against noisy game outcomes. Must be set
-# before neural_network reads its env config.
+# Configure dense engine-evaluation labels before importing neural_network.
 os.environ.setdefault('VALUE_LOSS_WEIGHT', '1.0')
 
 import neural_network as N
@@ -60,12 +43,7 @@ INGEST_MANIFEST = 'ingest_manifest.json'
 
 
 class DistillShardDataset(IterableDataset):
-    """Streams (fen, move, value) shards; encodes tensors in the workers.
-
-    Rows whose stored move is not legal in the stored FEN are skipped and
-    counted instead of raising — a handful of bad rows must not kill an
-    overnight run. (Ingestion-time sampling puts the bad-row rate at ~0.)
-    """
+    """Stream shards and encode FENs in DataLoader workers."""
 
     def __init__(self, shard_paths, shuffle=True, seed=0):
         self.shard_paths = sorted(shard_paths)
@@ -101,9 +79,7 @@ class DistillShardDataset(IterableDataset):
                 try:
                     board = chess.Board(fens[i])
                     flip = board.turn == chess.BLACK
-                    # parse_uci (not Move.from_uci): Lichess PVs write castling
-                    # as king-takes-rook (e1h1); parse_uci normalizes it to
-                    # standard UCI and validates legality.
+                    # parse_uci normalizes Lichess king-takes-rook castling.
                     move = board.parse_uci(moves[i])
                     move_idx = move_to_policy_index_v3(move, flip=flip)
                     legal = legal_policy_indices_v3(board, flip=flip)
@@ -137,8 +113,7 @@ def _make_loader(dataset, batch_size, workers):
         'pin_memory': N.DEVICE.type == 'cuda',
         'collate_fn': make_collate_policy_batch(MOVE_VOCAB),
         'persistent_workers': False,   # each epoch builds a fresh loader
-        # Keep DataLoader worker seeding off the global torch RNG. That makes
-        # restoring the model/dropout RNG from a mid-epoch checkpoint exact.
+        # Keep worker seeding separate from the resumable model/dropout RNG.
         'generator': loader_generator,
     }
     if workers > 0:
@@ -203,9 +178,7 @@ def _load_data_provenance(data_dir: str,
             'source_revision': manifest.get('source', {}).get('revision'),
         }
 
-    # Compatibility for corpora generated before manifests landed. The old
-    # stats file at least provides an immutable fingerprint of that local
-    # corpus; new ingests always use the stronger manifest above.
+    # Legacy stats still provide a stable local corpus fingerprint.
     legacy_path = os.path.join(data_dir, 'ingest_stats.json')
     if os.path.exists(legacy_path):
         with open(legacy_path, encoding='utf-8') as f:
@@ -387,9 +360,7 @@ def _restore_checkpoint(path, model, optimizer, scaler, data_provenance,
         )
     recorded_config = checkpoint.get('training_config') or {}
     expected_training_config = expected_training_config or {}
-    # These fields define optimizer scheduling or the deterministic location
-    # represented by `step`. Changing them while claiming an exact resume can
-    # silently replay/skip the wrong samples or alter the next update.
+    # Reject resume settings that would change scheduling or sample position.
     for key in (
         'lr', 'lr_decay', 'weight_decay', 'batch_size', 'workers', 'seed',
         'channels_last', 'deterministic',
@@ -403,9 +374,7 @@ def _restore_checkpoint(path, model, optimizer, scaler, data_provenance,
                 )
 
     if 'rng_state' not in checkpoint:
-        # The seeded data stream still replays in order, but dropout and any
-        # other consumers of the global RNGs restart from the fresh seed
-        # instead of the exact state at the save point.
+        # Missing RNG state prevents bit-identical continuation.
         print(
             f'WARNING: {path!r} predates RNG-state capture; the resumed run '
             'is deterministic but not bit-identical to an uninterrupted one.',
@@ -542,8 +511,7 @@ def main():
             expected_training_config=vars(args),
         )
         checkpoint_epoch = int(ckpt.get('epoch', 0))
-        # Legacy checkpoints did not write epoch_complete. Presence of a step
-        # means they came from a mid-epoch save; epoch-end saves omitted it.
+        # Legacy checkpoints with a step marker were saved mid-epoch.
         epoch_complete = bool(
             ckpt.get('epoch_complete', 'step' not in ckpt)
         )
@@ -728,9 +696,7 @@ def main():
             print(f'  no improvement over {best_val:.4f}; checkpoint kept',
                   flush=True)
 
-        # The best-model file may intentionally point to an earlier validation
-        # step. Keep a separate latest-state checkpoint whose completion marker
-        # makes continuation unambiguous even when validation did not improve.
+        # Keep latest training state separate from the best validation model.
         _save(model, optimizer, scaler, args.output + '.midtrain', {
             'epoch': epoch,
             'step': processed_step,

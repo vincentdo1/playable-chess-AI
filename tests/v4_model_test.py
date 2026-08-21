@@ -1,12 +1,4 @@
-"""ChessModelV4 (SE-ResNet distillation net) sanity tests.
-
-Standalone runnable:  python tests/v4_model_test.py
-
-Covers: forward shapes, checkpoint round-trip through load_trained_model's
-arch_version dispatch (bit-identical weights, v3 models unaffected),
-deterministic eval, and a tiny-batch overfit through the exact training loss
-path — the same bar the audit set for v3.
-"""
+"""ChessModelV4 shape, checkpoint, and training tests."""
 
 import os
 import sys
@@ -37,11 +29,7 @@ def test_forward_shapes():
 
 
 def test_untrained_auxiliary_planes_are_ignored():
-    """Four-field distillation FENs cannot supervise clock/repetition planes.
-
-    Existing v4 weights must therefore be invariant to channels 17-19 when a
-    live six-field FEN contains a nonzero halfmove clock or repetition state.
-    """
+    """Ignore clock and repetition planes absent from distillation FENs."""
     torch.manual_seed(7)
     model = ChessModelV4(filters=16, blocks=1).eval()
     base = torch.randn(2, BOARD_CHANNELS_V3, 8, 8)
@@ -101,7 +89,6 @@ def test_v3_dispatch_unaffected():
 
 
 def test_tiny_overfit():
-    """256 real rows through the v4 net + production loss must memorize."""
     chunk = 'data/train_chunks_v3/chunk_0000.npz'
     if not os.path.exists(chunk):
         print('  SKIP overfit: v3 chunk missing')

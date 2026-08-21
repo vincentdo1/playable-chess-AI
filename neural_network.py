@@ -1,4 +1,4 @@
-"""Chess move prediction model — PyTorch, GPU-accelerated."""
+"""Chess policy/value models and training loop."""
 
 import os
 import glob
@@ -107,9 +107,7 @@ def print_device_info():
 
 BOARD_ENCODING_VERSION = 'perspective_v2'
 BOARD_ENCODING_VERSION_V3 = 'perspective_v3'
-# Which architecture neural_network.py trains. Serving (load_model.py)
-# dispatches on the checkpoint's stored encoding instead, so old v2
-# checkpoints stay loadable regardless of this setting.
+# Serving selects the architecture from checkpoint metadata, not this default.
 ARCH_VERSION = os.environ.get('ARCH_VERSION', 'v3')
 WEIGHT_DECAY = float(os.environ.get('WEIGHT_DECAY', '5e-4'))
 LABEL_SMOOTHING = float(os.environ.get('LABEL_SMOOTHING', '0.05'))
@@ -147,12 +145,8 @@ POLICY_TARGET_NEGATIVE = -1
 def fen_to_tensor(fen, flip: bool | None = None):
     """FEN -> 8x8x17 perspective tensor.
 
-    By default, the tensor uses the FEN side-to-move perspective. Passing
-    flip=True forces Black's perspective; passing flip=False forces White's.
-    Black perspective rotates the board 180 degrees and maps Black pieces to
-    the "own_*" channels. That keeps policy coordinates and board channels in
-    the same side-to-move frame instead of mixing perspective moves with
-    absolute white/black piece planes.
+    The default is the side-to-move perspective. Black's perspective rotates
+    the board and maps Black pieces to the ``own_*`` channels.
     """
     tensor = np.zeros((8, 8, BOARD_CHANNELS), dtype=np.float32)
     board = chess.Board(fen)
@@ -223,12 +217,8 @@ def legal_policy_indices(board: chess.Board, flip: bool = False):
         dtype=np.int32,
     )
 
-# ---------------------------------------------------------------------------
 # v3 encoding: 20 board channels (17 + halfmove clock + 2 repetition planes)
-# and a spatial move vocabulary of from-square x 76 move-type planes
-# (56 queen-type direction/distance, 8 knight, 12 promotion). Replaces the
-# flat 64x64x5 vocab so the policy head can stay convolutional.
-# ---------------------------------------------------------------------------
+# and a spatial vocabulary of from-square x 76 move-type planes.
 
 V3_EXTRA_CHANNELS = {'halfmove_clock': 17, 'repetition_1': 18, 'repetition_2': 19}
 BOARD_CHANNELS_V3 = BOARD_CHANNELS + len(V3_EXTRA_CHANNELS)
@@ -255,10 +245,8 @@ MOVE_VOCAB_SIZE_V3 = 64 * NUM_MOVE_PLANES
 def board_to_tensor_v3(board: chess.Board, flip: bool | None = None):
     """Board -> 8x8x20 perspective tensor with clock/repetition planes.
 
-    Repetition planes use the board's move stack: a board rebuilt from FEN
-    only (no history) gets zero repetition planes, matching what the model
-    sees for fresh positions. In the perspective frame the side to move
-    always advances toward increasing row.
+    Boards rebuilt from FEN have no repetition history, so those planes remain
+    zero. The side to move always advances toward increasing rows.
     """
     if flip is None:
         flip = board.turn == chess.BLACK
@@ -394,7 +382,7 @@ def move_sequence_to_vector(move_sequence, max_length=10, flip: bool = False):
 # Dataset
 
 class ChunkDataset(torch.utils.data.IterableDataset):
-    """Streams .npz chunk files sequentially — no random-access disk thrashing."""
+    """Stream .npz chunk files sequentially."""
     def __init__(self, chunk_dir, shuffle=True,
                  expected_encoding=BOARD_ENCODING_VERSION):
         self.expected_encoding = expected_encoding
@@ -620,7 +608,7 @@ class ChessModel(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(filters * 8 * 8 + 64, 256),
             nn.ReLU(),
-            nn.Linear(256, 128),  # Dropout removed — hurts chess CNN performance
+            nn.Linear(256, 128),
             nn.ReLU(),
         )
         self.policy_head = nn.Linear(128, MOVE_VOCAB_SIZE)
@@ -641,18 +629,7 @@ class ChessModel(nn.Module):
 
 
 class ChessModelV3(nn.Module):
-    """Perspective ResNet with fully-convolutional policy head (v3 encoding).
-
-    Differences from ChessModel (v2):
-      - 20 input channels: + halfmove clock and two repetition planes.
-      - No LSTM/move history: the history signal measured ~1% top-1 and
-        caused a train/serve skew (the web backend has no move stack).
-      - Policy is spatial: a 1x1 conv produces 76 move-type planes per
-        square; logit index = from_square * 76 + plane. This removes the
-        128-dim FC bottleneck in front of a 20k-class softmax that limited
-        v2's middlegame generalization.
-      - Value head reads the conv features directly.
-    """
+    """Perspective ResNet with spatial policy and value heads."""
 
     def __init__(self, filters=RESIDUAL_FILTERS, blocks=RESIDUAL_BLOCKS,
                  head_dropout=HEAD_DROPOUT):
@@ -741,13 +718,7 @@ class ResidualSEBlock(nn.Module):
 
 
 class ChessModelV4(nn.Module):
-    """SE-ResNet for engine distillation (docs/ROADMAP_2500.md WS2).
-
-    Same v3 board encoding and head layout as ChessModelV3 — only the tower
-    changes (squeeze-excitation blocks, configurable width/depth from
-    constructor args instead of env so the checkpoint metadata alone can
-    rebuild the exact architecture at serving time).
-    """
+    """Configurable SE-ResNet using the v3 encoding and heads."""
 
     def __init__(self, filters=256, blocks=12, head_dropout=HEAD_DROPOUT):
         super().__init__()
@@ -756,12 +727,8 @@ class ChessModelV4(nn.Module):
         self.encoding_spec = get_encoding_spec(self.encoding_version)
         self.filters = filters
         self.blocks = blocks
-        # The Lichess evaluations dataset contains four-field FENs, so neither
-        # the halfmove clock nor repetition history exists in the v4 training
-        # corpus. Keep those three v3 auxiliary planes at zero at the model
-        # boundary. Without this mask, live six-field FENs activate input
-        # weights that received no training signal and create a train/serve
-        # skew in the already-trained v4 checkpoint.
+        # v4 training used four-field FENs, so its clock/repetition planes had
+        # no training signal and must stay zero when serving.
         input_plane_mask = torch.ones(1, BOARD_CHANNELS_V3, 1, 1)
         input_plane_mask[:, BOARD_CHANNELS:, :, :] = 0.0
         self.register_buffer(
@@ -813,9 +780,7 @@ def build_model(arch_version: str):
             filters=RESIDUAL_FILTERS, blocks=RESIDUAL_BLOCKS
         ), BOARD_ENCODING_VERSION_V3
     if arch_version == 'v4':
-        # Preserve v4's intentionally larger default. Distillation passes
-        # explicit dimensions, while the generic v2/v3 env knobs remain
-        # backward compatible with their historical architectures.
+        # v4 dimensions come from distillation/checkpoint metadata.
         return ChessModelV4(), BOARD_ENCODING_VERSION_V3
     raise ValueError(f"Unknown ARCH_VERSION: {arch_version!r}")
 
