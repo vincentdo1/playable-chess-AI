@@ -1,11 +1,6 @@
-"""Measure how much the blunder guard improves real move quality, by phase.
+"""Compare production and blunder-guarded move quality by game phase.
 
-Same protocol as diagnose_value_rerank: boards rebuilt from FEN only (live
-backend conditions), Stockfish scores the cp loss of each chosen move.
-
-Configs compared:
-  production : value_weight=2.0, value_candidates=0 (current live default)
-  guarded    : production + inference/blunder_guard filtering
+Positions are rebuilt from FEN and each selected move is scored by Stockfish.
 """
 
 import argparse

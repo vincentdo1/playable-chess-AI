@@ -9,9 +9,7 @@ from inference.blunder_guard import filter_scored_moves
 
 
 def test_vetoes_hanging_queen():
-    # Italian-ish position, black pawn on d5 defended by the c6 knight.
-    # Qxd5?? loses the queen to Nxd5... not quite — build a clean case:
-    # White queen can capture a pawn defended by a pawn.
+    # The e6 pawn can recapture Qxd5.
     board = chess.Board(
         'rnbqkbnr/ppp2ppp/4p3/3p4/8/3P1Q2/PPP1PPPP/RNB1KBNR w KQkq - 0 9'
     )
@@ -34,7 +32,6 @@ def test_keeps_reasonable_moves():
     scored = [(-float(i), m) for i, m in enumerate(moves)]
     safe = filter_scored_moves(board, scored, depth=2, margin_cp=150)
     assert len(safe) >= 1
-    # order must be preserved (model score order)
     scores = [s for s, _ in safe]
     assert scores == sorted(scores, reverse=True)
 

@@ -1,20 +1,4 @@
-"""Audit tests 1+2: board encoding correctness and side-to-move orientation.
-
-What is proven here:
-  1. fen_to_tensor / board_to_tensor_v3 are lossless: an independent decoder
-     reconstructs the exact position (pieces, castling, legal en passant)
-     from the tensor, for both perspectives, across random playouts.
-  2. Side-to-move orientation is exactly self-consistent: a position P and
-     its 180-degree-rotated color-swapped twin Q produce BYTE-IDENTICAL
-     tensors and IDENTICAL policy label indices (v2 and v3 codecs). Any
-     white/black asymmetry bug in the perspective frame breaks this.
-  3. The v3 convolutional policy head's spatial frame matches the board
-     planes: the from-square of every legal move's policy index lands on
-     the tensor cell that holds the moving piece.
-  4. End-to-end on the real trained v3 checkpoint: the inference path
-     (load_model._get_move_scores) gives the same scores for P and Q with
-     moves mapped through the rotation, and the same value.
-"""
+"""Board encoding, orientation, and policy alignment tests."""
 
 import os
 import random
@@ -40,11 +24,7 @@ _NAME_TO_PIECE_TYPE = {
 
 
 def decode_tensor(tensor, turn):
-    """Independent inverse of fen_to_tensor: tensor + side-to-move -> board.
-
-    Deliberately re-derives the coordinate convention from scratch so a bug
-    in fen_to_tensor cannot hide behind a shared implementation.
-    """
+    """Decode independently of the production coordinate helpers."""
     flip = (turn == chess.BLACK)
     own_color = chess.BLACK if flip else chess.WHITE
     board = chess.Board(None)

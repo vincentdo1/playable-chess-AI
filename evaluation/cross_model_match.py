@@ -1,13 +1,4 @@
-"""Play a match between two models that may live in different code branches.
-
-Each side runs in its own move_server.py subprocess with its own working
-directory and checkpoint, so branches with incompatible architectures or
-incompatible load_model.py / neural_network.py versions can still play each
-other over the JSON line protocol.
-
-Alternates colors, reports a per-game score and a final Elo gap with a 95% CI,
-and optionally writes the games to PGN.
-"""
+"""Compare models from separate working trees over a JSON-lines protocol."""
 
 from __future__ import annotations
 
@@ -69,8 +60,7 @@ def play_game(player_a: subprocess.Popen, player_b: subprocess.Popen,
               max_plies: int, game_seed: int) -> tuple[str, chess.Board]:
     board = chess.Board()
     history: list[str] = []
-    # Seed each player once, on its first move this game, so sampled play
-    # diverges between games while staying reproducible for a fixed --seed.
+    # Seed once per game and player for reproducible sampling.
     seeded = {id(player_a): False, id(player_b): False}
     while not board.is_game_over(claim_draw=True):
         if len(board.move_stack) >= max_plies:
@@ -79,7 +69,7 @@ def play_game(player_a: subprocess.Popen, player_b: subprocess.Popen,
         proc = player_a if a_to_move else player_b
         kwargs = dict(a_kwargs if a_to_move else b_kwargs)
         if not seeded[id(proc)]:
-            # Offset A vs B so the two players don't share an identical stream.
+            # Give the players independent random streams.
             kwargs['seed'] = game_seed + (0 if proc is player_a else 100000)
             seeded[id(proc)] = True
         try:
@@ -145,8 +135,7 @@ def main() -> int:
 
     def kwargs_for(method, sims, temperature):
         if method == 'mcts':
-            # move_temperature drives MCTS root-move sampling; reuse the same
-            # knob so >0 yields game variety for the search player too.
+            # Use the policy temperature knob for MCTS root sampling too.
             return {'method': method, 'sims': sims, 'move_temperature': temperature}
         return {'method': method, 'temperature': temperature}
 

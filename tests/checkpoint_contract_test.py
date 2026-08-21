@@ -78,10 +78,7 @@ def test_unexpected_state_key_fails_closed():
 
 
 def test_dimensionless_legacy_checkpoint_uses_env_knob_defaults():
-    # Pre-metadata v2/v3 checkpoints carry no residual_filters/blocks; their
-    # dimensions were set by the RESIDUAL_FILTERS/RESIDUAL_BLOCKS env knobs at
-    # training time, so loading must fall back to those knobs, not to a
-    # hardcoded 128x8.
+    # Legacy dimensions come from training-time environment settings.
     model = ChessModelV3(filters=16, blocks=2)
     payload = {
         'model_state_dict': model.state_dict(),

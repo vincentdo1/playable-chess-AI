@@ -1,14 +1,6 @@
-"""Cap duplicated positions in training chunks before a retrain.
+"""Limit repeated position/move pairs in training chunks.
 
-Why: in data/train_chunks, opening positions (moves 1-10) are 82% duplicates
-while positions after move 20 are ~99% unique, so training loss is dominated
-by re-memorizing opening theory instead of generalizing in the middlegame â€”
-exactly where the model collapses (top-1 64% -> 37%, blunders 0.7% -> 14%).
-
-Streams chunk files and writes new ones where each unique position+played-move
-pair appears at most --max_repeats times (distinct played moves from the same
-position are kept, preserving the move distribution's support). Metadata is
-carried over unchanged, so the output is a drop-in TRAIN_DIR.
+Distinct moves from the same position and all metadata are preserved.
 """
 
 import argparse
@@ -18,8 +10,7 @@ from collections import Counter
 
 import numpy as np
 
-# 'moves' is only present in v2 chunks (v3 has no LSTM history); the writer
-# uses whichever of these keys the input chunk actually has.
+# ``moves`` exists only in v2 chunks.
 ALL_PER_ROW_KEYS = (
     'boards', 'moves', 'move_idx', 'policy_target_type', 'fen', 'played_uci',
     'played_engine_best', 'cp_loss', 'sample_weight', 'is_bad_move',

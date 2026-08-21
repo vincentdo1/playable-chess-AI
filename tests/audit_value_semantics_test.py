@@ -1,22 +1,4 @@
-"""Audit test 4: value-target sign conventions across the whole chain.
-
-The convention everywhere is: value = expected outcome from the CURRENT
-side-to-move's point of view, in [-1, 1]. This test proves each link:
-  a. preprocess label functions (_result_value_for_color, _cp_to_value)
-     follow the convention as pure functions;
-  b. self-play outcome labeling follows it (recomputed from its formula);
-  c. the TRAINED v3 value head learned it: blatant won/lost positions get
-     confidently positive/negative values for the side to move;
-  d. load_model's one-ply value rerank negates correctly: a mate-in-1 move
-     scores exactly +1 via the terminal path and is chosen; a stalemating
-     move scores exactly 0;
-  e. MCTS backup keeps the sign: from a mate-in-1 root, search converges on
-     the mate and reports Q ~= +1 for it from the root player's view.
-
-If any sign in the chain were flipped, training loss would still decrease
-(the head fits whatever target it is given) while play collapses — this is
-exactly the class of bug the audit targets.
-"""
+"""Verify side-to-move value signs through preprocessing and inference."""
 
 import os
 import sys
@@ -30,8 +12,7 @@ from training.preprocess import _cp_to_value, _result_value_for_color
 
 V3_MODEL_PATH = 'model/grandmaster_resnet_v3.pt'
 
-# Blatant positions: side to move is a queen up (or down) in a quiet spot.
-# (fen, expected_sign) with value from the side-to-move's perspective.
+# (FEN, expected side-to-move value sign)
 SIGN_PROBES = [
     # White to move with an extra queen.
     ('4k3/8/8/8/8/8/4P3/QQ2K3 w - - 0 1', +1),
@@ -50,7 +31,7 @@ MATE_IN_1 = [
 ]
 
 STALEMATE_IN_1 = [
-    # White queen c7->c6?? stalemates the black king on a8 (Ka7 illegal etc).
+    # Queen retreat leaves Black with no legal move.
     ('k7/2Q5/8/8/8/8/8/4K3 w - - 0 1', 'c7b6', 'a8'),
 ]
 
@@ -69,7 +50,6 @@ def test_preprocess_value_functions():
 
 
 def test_self_play_outcome_labeling():
-    # Reproduces experiments/self_play.py's formula on both outcomes.
     for winner in (chess.WHITE, chess.BLACK):
         for stm_is_white in (True, False):
             target = 1.0 if (winner == chess.WHITE) == stm_is_white else -1.0

@@ -1,17 +1,4 @@
-"""Head-to-head evaluation between two checkpoints, with an Elo estimate.
-
-Games start from a suite of diverse opening lines so a strength edge in one
-structure cannot dominate the result. A built-in suite of common openings is
-the default; --openings <file> takes one opening per line (UCI moves separated
-by spaces, e.g. "e2e4 e7e5 g1f3"). Each opening is played twice with colors
-swapped and both games count, which cancels color and opening-side advantage
-pair by pair â€” the cleanest way to make a short match informative when play is
-near-deterministic. --no_openings starts every game from the initial position.
-
-Reports Elo with a 95% CI. Methods per side: 'mcts' (search), 'policy' (single
-forward pass, temperature sampling), or 'search' (alpha-beta with the network
-as evaluator).
-"""
+"""Run paired-opening matches between two checkpoints and estimate Elo."""
 
 from __future__ import annotations
 
@@ -27,9 +14,7 @@ from inference.search_player import search_best_move
 from inference.mcts_player import mcts_search_best_move
 
 
-# A compact, structurally-diverse opening suite (UCI move lists). These are
-# only a few plies deep so models still make most of the game's decisions, but
-# deep enough to vary pawn structure and piece deployment across games.
+# Short UCI openings spanning several pawn structures.
 DEFAULT_OPENINGS = {
     'startpos': '',
     'open_e4e5': 'e2e4 e7e5',
@@ -167,12 +152,8 @@ def run_match(args) -> dict:
     method_a, method_b = args.method_a, args.method_b
     openings = _load_openings(args)
 
-    # Build the game schedule. With paired play, each opening contributes two
-    # games (A-white then A-black). When --games exceeds one pass over the
-    # suite, we repeat the paired schedule in additional CYCLES; each cycle
-    # reshuffles opening order and bumps the RNG seed so the repeated games
-    # actually diverge (otherwise deterministic play would replay identical
-    # games and falsely shrink the confidence interval).
+    # Pair colors per opening. Later cycles reshuffle and reseed so repeated
+    # openings do not falsely narrow the confidence interval.
     schedule: list[tuple[str, str, bool, int]] = []  # (name, moves, a_is_white, seed)
     if args.paired:
         base_pairs = [(name, moves) for name, moves in openings]
@@ -182,7 +163,6 @@ def run_match(args) -> dict:
         while len(schedule) < target:
             order = list(base_pairs)
             if cycle > 0:
-                # Reshuffle order and vary seed on every cycle past the first.
                 rng = random.Random(args.seed + cycle)
                 rng.shuffle(order)
             for name, moves in order:
@@ -211,8 +191,7 @@ def run_match(args) -> dict:
             print(f"  [skip] illegal opening {name!r}: {moves}", flush=True)
             skipped += 1
             continue
-        # Re-seed per game so repeated cycles of the same opening diverge but the
-        # whole match stays reproducible for a fixed --seed.
+        # Keep repeated cycles distinct and the full match reproducible.
         random.seed(game_seed + gi)
         np.random.seed((game_seed + gi) % (2**32 - 1))
         if a_is_white:
@@ -269,7 +248,6 @@ def main():
     parser.add_argument('--model_b', required=True)
     parser.add_argument('--method_a', choices=('mcts', 'policy', 'search'), default='mcts')
     parser.add_argument('--method_b', choices=('mcts', 'policy', 'search'), default='mcts')
-    # Opening / pairing controls
     parser.add_argument('--paired', action='store_true', default=True,
                         help='Play each opening twice with swapped colors (default on).')
     parser.add_argument('--no_paired', dest='paired', action='store_false',
@@ -283,17 +261,14 @@ def main():
                         help='Cap on games. 0 = use the full suite (x2 if --paired).')
     parser.add_argument('--max_plies', type=int, default=200)
     parser.add_argument('--seed', type=int, default=1)
-    # MCTS params
     parser.add_argument('--sims', type=int, default=200)
     parser.add_argument('--c_puct', type=float, default=1.5)
     parser.add_argument('--mcts_batch_size', type=int, default=16)
     parser.add_argument('--policy_temperature', type=float, default=1.5)
     parser.add_argument('--move_temperature', type=float, default=0.0)
-    # Policy params
     parser.add_argument('--temperature', type=float, default=0.3)
     parser.add_argument('--value_weight', type=float, default=2.0)
     parser.add_argument('--value_candidates', type=int, default=0)
-    # Search params
     parser.add_argument('--search_depth', type=int, default=3)
     parser.add_argument('--search_time', type=float, default=None)
     args = parser.parse_args()

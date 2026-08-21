@@ -1,15 +1,4 @@
-"""Inference-time alpha-beta search backed by the trained ChessModel.
-
-Two ideas combined:
-  - Policy head supplies move ordering, so alpha-beta cuts off branches fast.
-  - Value head supplies leaf evaluations, replacing hand-crafted heuristics.
-
-Plus the standard alpha-beta machinery that buys real Elo:
-  iterative deepening, transposition table, quiescence on captures,
-  Zobrist-keyed caching of network outputs so repeated positions cost zero.
-
-Public entry point: ``search_best_move(model, board, ...)``.
-"""
+"""Alpha-beta search using network policy ordering and leaf evaluation."""
 
 from __future__ import annotations
 
@@ -60,12 +49,7 @@ class SearchStats:
 
 
 class NNEvaluator:
-    """Single point of contact with the network; caches by encoded position.
-
-    Returns (policy_logits over MOVE_VOCAB_SIZE classes, value in [-1, 1] from side-to-move).
-    Positions repeat constantly in alpha-beta (move ordering revisits the root,
-    transposition collisions, qsearch back-references), so caching matters.
-    """
+    """Evaluate and cache policy logits and side-to-move values."""
 
     def __init__(self, model: ChessModel, stats: SearchStats | None = None):
         self.model = model
@@ -77,11 +61,7 @@ class NNEvaluator:
         self.stats = stats
 
     def cache_key(self, board: chess.Board) -> tuple:
-        """Include every history-dependent input consumed by the model.
-
-        Polyglot hashes omit the halfmove clock and move history. Reusing only
-        that hash is incorrect for v3's clock/repetition planes and v2's LSTM.
-        """
+        """Include history-dependent model inputs omitted by Polyglot hashes."""
         position_hash = chess.polyglot.zobrist_hash(board)
         if self.encoding_version == BOARD_ENCODING_VERSION_V3:
             repetition_2 = bool(board.move_stack and board.is_repetition(2))
@@ -126,7 +106,6 @@ class NNEvaluator:
 def _terminal_score_cp(board: chess.Board, ply: int) -> int | None:
     """Score from side-to-move's POV for terminal nodes, else None."""
     if board.is_checkmate():
-        # The side to move is the one being mated.
         return -(MATE_SCORE - ply)
     if (
         board.is_stalemate()
@@ -164,8 +143,7 @@ def _ordered_moves(
     for move in legal:
         score = float(policy_logits[evaluator.move_to_index(move, flip=is_black)])
         if board.is_capture(move):
-            # Capture bonus is tuned to roughly match the policy logit scale
-            # so a good capture beats a moderately-likely quiet move.
+            # Keep tactical bonuses on roughly the same scale as policy logits.
             score += 4.0 + 0.005 * _capture_score(board, move)
         if move.promotion == chess.QUEEN:
             score += 6.0
@@ -319,9 +297,8 @@ def search_best_move(
 ) -> chess.Move | None:
     """Iterative-deepening alpha-beta with the network as evaluator and orderer.
 
-    Stops at ``max_depth`` plies, or earlier when ``time_limit`` seconds elapse.
-    The deepest fully-completed iteration's best move is returned; a partial
-    iteration aborted by the timer is discarded.
+    A timed-out partial iteration is discarded in favor of the deepest
+    completed result.
     """
     if board.is_game_over(claim_draw=True):
         return None

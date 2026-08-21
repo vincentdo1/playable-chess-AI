@@ -1,15 +1,7 @@
-"""Diagnose why the model plays worse as the game goes on.
+"""Compare held-out model metrics by game phase.
 
-Buckets held-out test positions by fullmove number and reports, per bucket:
-
-  - top-1 policy accuracy and policy NLL with the TRUE move history
-    (what eval_arena / play_match see), versus with an ALL-ZERO move
-    history (what the web backend actually feeds the LSTM, because
-    /api/move rebuilds the board from FEN and the move stack is empty)
-  - how often the argmax move changes between the two history inputs
-  - value-head MAE and correlation against the Stockfish-derived target
-  - mean policy entropy over legal moves (a flat policy means the
-    value-head reranking in load_model.predict_next_move dominates)
+Reports policy metrics with recorded versus empty move history, value error,
+and legal-move policy entropy.
 """
 
 import argparse
@@ -58,7 +50,6 @@ class Accumulator:
         self.value_abs_err = np.zeros(n, dtype=np.float64)
         self.value_pred_sum = np.zeros(n, dtype=np.float64)
         self.entropy = np.zeros(n, dtype=np.float64)
-        # for correlation
         self.vp = [[] for _ in range(n)]
         self.vt = [[] for _ in range(n)]
 

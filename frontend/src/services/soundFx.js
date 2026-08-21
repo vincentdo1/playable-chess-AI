@@ -1,6 +1,5 @@
-// Short synthesized move/capture ticks via the Web Audio API — no asset files,
-// works offline. The context is created lazily and resumed on the first move so
-// it satisfies browser autoplay rules (a move always follows a user gesture).
+// Synthesized sounds avoid asset files. Initialize after the first user gesture
+// to satisfy browser autoplay rules.
 export class SoundFx {
   constructor() {
     this.ctx = null;

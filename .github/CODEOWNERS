@@ -1,9 +1,1 @@
 * @vincentdo1
-
-# High-risk contracts deserve an explicit owner review.
-/backend/ @vincentdo1
-/inference/ @vincentdo1
-/training/ @vincentdo1
-/evaluation/ @vincentdo1
-/neural_network.py @vincentdo1
-/load_model.py @vincentdo1

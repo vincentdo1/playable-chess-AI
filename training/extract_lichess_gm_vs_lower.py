@@ -1,11 +1,6 @@
-"""Extract GM-vs-lower-rated games from a Lichess .pgn or .pgn.zst dump.
+"""Extract GM-vs-lower-rated games from a Lichess PGN dump.
 
-The output is still normal PGN, but each selected game gets extra tags:
-TrainingPolicyColor, StrongSide, OpponentElo, and OpponentRatingBucket.
-
-Do not feed these games into policy training as-is unless preprocessing is set
-to train only the tagged GM side. The lower-rated side is useful as negative
-examples, not as moves to imitate.
+Selected games are tagged with the policy side and opponent rating metadata.
 """
 
 import argparse

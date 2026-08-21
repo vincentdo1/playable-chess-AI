@@ -29,7 +29,7 @@ def _order_moves(board):
         if move.promotion == chess.QUEEN:
             score += 11000
         elif move.promotion:
-            score += 6000   # underpromotions still useful, but low priority
+            score += 6000
 
         if board.gives_check(move):
             score += 9000
@@ -65,10 +65,7 @@ def random_move_player(board):
     return random.choice(legal_moves)
 
 def alphabeta(side, board, depth=None):
-    """
-    Top-level alphabeta call. If depth is None, uses adaptive depth
-    from heuristics.get_search_depth() based on game phase.
-    """
+    """Choose a move with alpha-beta search and optional adaptive depth."""
     if depth is None:
         depth = heuristics.get_search_depth(board)
 
@@ -96,9 +93,9 @@ def alphabetahelper(side, board, depth, alpha, beta):
     if board.is_checkmate():
         # board.turn is the side being mated
         if board.turn == chess.WHITE:
-            return -(10000 - depth)   # White is mated → bad for White
+            return -(10000 - depth)
         else:
-            return 10000 - depth      # Black is mated → great for White
+            return 10000 - depth
     if board.is_repetition(3):
         return 0
     if board.is_stalemate() or board.is_insufficient_material():

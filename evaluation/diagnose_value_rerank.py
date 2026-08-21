@@ -1,15 +1,6 @@
-"""Measure how the value-head reranking affects real move quality, by phase.
+"""Compare policy-only and value-reranked move quality by game phase.
 
-Replicates the live backend exactly: the board is rebuilt from FEN only
-(empty move stack, like /api/move), then load_model._get_move_scores picks a
-move with temperature 0 under two configs:
-
-  policy-only : value_weight = 0.0
-  production  : value_weight = 2.0, value_candidates = 0  (rerank all moves)
-
-Stockfish then scores the centipawn loss of each chosen move. If the
-production config blunders more in the middlegame/endgame than policy-only,
-the noisy value head (corr ~0.3 after move 20) is what's giving pieces away.
+Positions are rebuilt from FEN and each selected move is scored by Stockfish.
 """
 
 import argparse

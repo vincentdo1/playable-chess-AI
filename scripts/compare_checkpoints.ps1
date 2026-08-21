@@ -1,23 +1,10 @@
 <#
 .SYNOPSIS
-  Run the full strength-comparison matrix for the resumed supervised model.
+  Compare a resumed model with base and self-play checkpoints.
 
 .DESCRIPTION
-  Plays paired-opening matches (via eval_arena.py) of the resumed checkpoint
-  against BOTH the supervised base and the best self-play checkpoint, in BOTH
-  MCTS and raw-policy modes. Raw policy matters because the deployed app uses
-  the policy/value head directly; MCTS matters because that is the strongest
-  setting. A model can win one mode and lose the other, so we measure both.
-
-  Each sub-match writes its full output to a log file and the script prints a
-  consolidated summary (the "Elo(A - B)" line) at the end.
-
-.EXAMPLE
-  .\compare_checkpoints.ps1 `
-    -Resumed model\grandmaster_resnet_v2_resumed.pt `
-    -Base    model\grandmaster_model_perspective_resnet_negatives_v2.pt `
-    -SelfPlay model\selfplay_checkpoints\selfplay_iter0020.pt `
-    -Sims 200 -Games 32
+  Runs paired-opening matches in MCTS and raw-policy modes, writes each match
+  log, and prints a consolidated Elo summary.
 #>
 
 param(
@@ -34,7 +21,7 @@ param(
 $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-# A=Resumed in every match, so a POSITIVE Elo always means "resumed is stronger".
+# A is the resumed model in every match.
 $matrix = @(
     @{ Name = "resumed_vs_base_mcts";       Opp = $Base;     Method = "mcts"   },
     @{ Name = "resumed_vs_base_policy";     Opp = $Base;     Method = "policy" },
@@ -62,10 +49,8 @@ foreach ($m in $matrix) {
         "--temperature", $PolicyTemperature
     )
 
-    # Run, tee to console and log.
     python @common 2>&1 | Tee-Object -FilePath $log
 
-    # Extract the headline Elo line for the summary table.
     $eloLine = Select-String -Path $log -Pattern "Elo\(A - B\)" | Select-Object -Last 1
     $verdict = Select-String -Path $log -Pattern "=> " | Select-Object -Last 1
     $summary += [pscustomobject]@{

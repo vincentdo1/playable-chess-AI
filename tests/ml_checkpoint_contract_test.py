@@ -1,17 +1,11 @@
-"""Focused ML data/checkpoint contract regressions.
-
-These tests intentionally exercise the production checkpoint writers and
-resume helpers. Synthetic hand-written model payloads would not catch metadata
-drift between a writer and load_model's architecture dispatch.
-"""
+"""ML data and checkpoint contract regression tests."""
 
 import json
 import os
 import sys
 import tempfile
 
-# Keep pyarrow before torch for the Windows DLL ordering constraint documented
-# in training/train_distill.py.
+# Preserve the Windows-safe pyarrow/torch import order.
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch

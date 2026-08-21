@@ -1,20 +1,4 @@
-"""Audit test 7: evaluation/serving really loads the intended checkpoint.
-
-For every checkpoint in model/:
-  - a STRICT state-dict load into the architecture selected by the stored
-    board_encoding must succeed (exact key and shape match with today's code â€”
-    no silently skipped or randomly initialized layers);
-  - stored residual_filters/residual_blocks must match the architecture the
-    loaders would build right now;
-  - load_trained_model() must hand back weights BIT-IDENTICAL to the file's
-    tensors, with the right encoding spec attached and deterministic
-    eval-mode outputs.
-
-Then regression-tests three fixed hazards: load_trained_model rejects a
-checkpoint missing whole layers rather than serving a partly random network;
-the default MODEL_PATH points at v3; and evaluate_model.py follows the loaded
-checkpoint's encoding.
-"""
+"""Checkpoint loading and evaluation integration tests."""
 
 import glob
 import os
@@ -65,12 +49,10 @@ def test_all_checkpoints_load_strictly():
         encoding = ckpt.get('board_encoding') or BOARD_ENCODING_VERSION
         model = _build_for_checkpoint(ckpt)
 
-        # Strict load: raises on ANY missing/unexpected key or shape mismatch.
         model.load_state_dict(ckpt['model_state_dict'], strict=True)
 
         if ckpt.get('arch_version') != 'v4':
-            # v2/v3 build from module globals; v4 builds from its own
-            # checkpoint metadata, so the global check does not apply.
+            # v4 dimensions come from checkpoint metadata.
             assert ckpt.get('residual_filters', RESIDUAL_FILTERS) == RESIDUAL_FILTERS, (
                 f'{path}: trained with residual_filters='
                 f'{ckpt.get("residual_filters")} but current code builds '
@@ -82,7 +64,6 @@ def test_all_checkpoints_load_strictly():
                 f'{RESIDUAL_BLOCKS}'
             )
 
-        # The public loader must hand back bit-identical weights.
         loaded = load_trained_model(path)
         loaded_sd = loaded.state_dict()
         for name, tensor in ckpt['model_state_dict'].items():
@@ -93,7 +74,6 @@ def test_all_checkpoints_load_strictly():
         assert loaded.encoding_spec == get_encoding_spec(encoding)
         assert loaded.value_head_trained is True
 
-        # Deterministic eval-mode forward (dropout must be off).
         spec = get_encoding_spec(encoding)
         probe = torch.randn(2, spec['board_channels'], 8, 8)
         history = torch.zeros(
@@ -113,7 +93,6 @@ def test_all_checkpoints_load_strictly():
 
 
 def test_partial_checkpoint_rejected():
-    """Regression: a checkpoint missing whole layers must refuse to load."""
     src = 'model/grandmaster_resnet_v3.pt'
     if not os.path.exists(src):
         print('  SKIP partial-load test: v3 checkpoint missing')
@@ -156,7 +135,6 @@ def test_default_model_path_is_v3():
 
 
 def test_evaluate_model_wiring_measures_v3():
-    """Regression: held-out eval follows the checkpoint's encoding."""
     if not os.path.exists('model/grandmaster_resnet_v3.pt'):
         print('  SKIP evaluate_model wiring test: v3 checkpoint missing')
         return

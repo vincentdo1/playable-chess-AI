@@ -1,9 +1,4 @@
-# Phase 2: Full 20-shard ingest + v4 distillation training + gauntlet
-# Run from anywhere: .\run_phase2.ps1  (it cd's to the repo root itself).
-#
-# Interpreter note: bare `python` on this machine is C:\Python314 with NO
-# packages. The project environment is .venv (Python 3.12, torch 2.6+cu124,
-# pyarrow 24) -- this script pins it explicitly.
+# Ingest Lichess shards, train v4, and run the Stockfish gauntlet.
 
 param(
     [switch]$Execute,
@@ -62,7 +57,7 @@ function Run-Step {
     Write-Host "$Label done." -ForegroundColor Green
 }
 
-# --- Step 1: Ingest ---
+# Ingest
 $existingShards = @(Get-ChildItem "$OutDir/*.parquet" -ErrorAction SilentlyContinue)
 if ($existingShards.Count -gt 0) {
     if (-not (Test-Path $Manifest)) {
@@ -102,7 +97,7 @@ if ($existingShards.Count -gt 0) {
     Get-Content "$OutDir/ingest_stats.json"
 }
 
-# --- Step 2: Train (2 epochs) ---
+# Train
 $resumeFlag = @()
 if (-not [string]::IsNullOrWhiteSpace($ResumeCheckpoint)) {
     if (-not (Test-Path $ResumeCheckpoint)) {
@@ -123,7 +118,7 @@ Run-Step "Train v4 (2 epochs)" (@(
     "--epochs",    "2"
 ) + $resumeFlag) $TrainLog
 
-# --- Step 3: Gauntlet ---
+# Gauntlet
 Write-Host ""
 Write-Host "=== Gauntlet ===" -ForegroundColor Cyan
 
@@ -141,8 +136,7 @@ foreach ($elo in @(2000, 2300, 2500)) {
         "--require_p95_seconds", "2.0"
     )
     if ($elo -eq 2500) {
-        # Predeclared definition of done: the paired-game 95% lower score bound
-        # must clear 50%, not merely the noisy point estimate.
+        # Require the paired-game 95% lower score bound to clear 50%.
         $evalArgs += @("--require_score_lower_bound", "0.50")
     }
     & $Python @evalArgs | Tee-Object -FilePath "$LogDir/gauntlet_${elo}.log"

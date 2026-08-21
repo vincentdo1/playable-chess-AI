@@ -47,8 +47,7 @@ def checkpoint_objective(path: str | None) -> dict:
 def evaluate_chunks(model, test_dir, batch_size=512, top_k=(1, 3, 5),
                     value_loss_weight=VALUE_LOSS_WEIGHT,
                     label_smoothing=LABEL_SMOOTHING):
-    # Dataset and collator follow the loaded checkpoint's encoding so both
-    # model generations can be measured against their own chunk format.
+    # Match the dataset and collator to the checkpoint encoding.
     encoding = getattr(model, 'encoding_version', BOARD_ENCODING_VERSION)
     spec = getattr(model, 'encoding_spec', None) or get_encoding_spec(encoding)
     dataset = ChunkDataset(test_dir, shuffle=False, expected_encoding=encoding)

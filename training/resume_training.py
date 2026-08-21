@@ -1,14 +1,6 @@
-"""Resume supervised training from a checkpoint without regressing it.
+"""Resume supervised training and save only validation improvements.
 
-Reuses neural_network.py's dataset, collate, model, loss, and per-epoch
-train/eval functions verbatim; only the optimizer/scheduler/early-stop policy
-and the checkpoint gating differ. Three guarantees:
-
-1. best_val_loss is seeded from the source checkpoint's recorded value, so a
-   new checkpoint is written only when it genuinely beats the source.
-2. Output goes to a separate --output path; the input is never touched.
-3. The loaded weights are re-validated up front and the baseline printed, so a
-   silent train-from-random-init is visible.
+The source checkpoint is revalidated and never overwritten.
 """
 
 from __future__ import annotations
@@ -18,9 +10,7 @@ import os
 import sys
 import time
 
-# Force line-buffered stdout/stderr so `Tee-Object` / `tail -f` show progress in
-# real time even when the user forgets PYTHONUNBUFFERED=1. Belt-and-suspenders
-# with the flush=True we use on key prints below.
+# Keep progress visible through Tee-Object and tail.
 try:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
@@ -104,8 +94,7 @@ def main() -> int:
         os.makedirs(out_dir, exist_ok=True)
 
     device = N.DEVICE
-    # Use the patched neural_network preflight if present (REQUIRE_CUDA guard +
-    # device banner). Guarded so this still runs against an unpatched copy.
+    # Run the shared device preflight when available.
     if hasattr(N, 'assert_training_device'):
         N.assert_training_device()
     if hasattr(N, 'print_device_info'):
@@ -116,7 +105,6 @@ def main() -> int:
         print("  WARNING: not on CUDA; full-dataset training will be very slow.",
               flush=True)
 
-    # --- Load checkpoint (weights + recorded val_loss) ---
     if not os.path.exists(args.init):
         raise SystemExit(f"--init checkpoint not found: {args.init}")
     checkpoint = torch.load(args.init, map_location=device, weights_only=False)
@@ -135,8 +123,7 @@ def main() -> int:
     if skipped:
         print(f"  Skipped incompatible tensors: {skipped}")
     if load_result.missing_keys or skipped:
-        # If big chunks of the net are randomly initialized, resuming is not
-        # actually resuming. Refuse rather than silently train from rubble.
+        # Reject partial checkpoint loads.
         raise SystemExit(
             "Checkpoint does not fully match the current architecture; aborting "
             "so we do not accidentally train from partial/random weights."
@@ -158,7 +145,6 @@ def main() -> int:
     )
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
 
-    # --- Baseline: re-validate the loaded weights so we KNOW our starting point ---
     print("\nRe-validating loaded weights to establish the baseline...")
     baseline = N.evaluate(model, val_loader, value_criterion, device,
                           max_batches=N.MAX_VAL_BATCHES)
@@ -166,7 +152,7 @@ def main() -> int:
     print(f"  Baseline val_loss (recomputed): {baseline_val:.4f}  "
           f"move_acc={baseline['move_acc']:.4f}")
 
-    # Gate against the BETTER of recorded and recomputed, so we never regress.
+    # Compare against the better recorded or recomputed baseline.
     best_val_loss = baseline_val
     if recorded_val is not None:
         best_val_loss = min(best_val_loss, float(recorded_val))

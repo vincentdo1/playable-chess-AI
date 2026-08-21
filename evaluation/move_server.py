@@ -1,16 +1,7 @@
-"""Stdin/stdout move server driven by cross_model_match.py.
+"""Serve moves to cross_model_match.py over stdin/stdout JSON lines.
 
-Subprocess isolation lets each model run under its own branch's code. One
-JSON object per line:
-
-  ready    {"ready": true, "model_path": "...", "has_mcts": true}
-  request  {"history": ["e2e4","e7e5"], "method": "policy"|"mcts", ...}
-  response {"move": "g1f3"} or {"error": "..."}
-  shutdown {"cmd": "quit"}, or stdin closes
-
-Requires load_model.load_trained_model + predict_next_move. MCTS additionally
-needs mcts_player.mcts_search_best_move; without it the server reports
-has_mcts=false at startup and rejects mcts requests.
+The server emits a readiness object, accepts position requests, and returns a
+move or error. ``{"cmd": "quit"}`` and EOF stop the process.
 """
 
 from __future__ import annotations
@@ -30,8 +21,7 @@ def main() -> int:
                         help='Checkpoint to load; defaults to the branch MODEL_PATH.')
     args = parser.parse_args()
 
-    # load_trained_model prints status lines to stdout; route any such prints
-    # to stderr so the JSON line protocol on stdout stays clean.
+    # Keep loader status output off the JSON protocol stream.
     try:
         with contextlib.redirect_stdout(sys.stderr):
             from load_model import load_trained_model, predict_next_move
@@ -73,9 +63,7 @@ def main() -> int:
             for uci in req.get('history', []):
                 board.push(chess.Move.from_uci(uci))
 
-            # Optional per-request seed so the driver can make each game's
-            # sampled moves diverge (otherwise temperature>0 still repeats
-            # because numpy's global RNG state is process-wide).
+            # A request seed makes sampled games reproducible and distinct.
             seed = req.get('seed')
             if seed is not None:
                 import numpy as _np

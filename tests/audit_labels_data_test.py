@@ -1,22 +1,4 @@
-"""Audit tests 3+4+6 on REAL v3 chunk data: label legality, value targets,
-and train-vs-inference preprocessing parity.
-
-What is proven here, on sampled rows from every v3 chunk directory:
-  3. Policy labels are legal: move_idx is inside its own legal-move window,
-     the stored legal window equals the legal moves recomputed from the FEN,
-     and move_idx decodes back to exactly the stored played_uci.
-  4. Value targets obey the side-to-move convention's invariants:
-     in [-1, 1]; result-sourced targets are exactly -1/0/+1; sample weights
-     match the documented cp-loss schedule.
-  6. The tensor written at preprocessing time equals the tensor the serving
-     path (load_model._position_arrays) builds from the same FEN, on every
-     channel except the two repetition planes (which need in-game history
-     that a FEN-only board cannot have — the known, measured serve skew).
-     The collator's channel-first permutation equals the serving one.
-
-Also streams one full chunk through ChunkDataset + DataLoader with the v3
-collator, which hard-fails on any target missing from its legal mask.
-"""
+"""Validate v3 chunk labels, values, and serving tensor parity."""
 
 import glob
 import os
@@ -87,7 +69,6 @@ def audit_chunk(path, rng):
         start, end = int(offsets[i]), int(offsets[i + 1])
         window = legal_indices[start:end]
 
-        # --- 3. policy label legality ---
         assert move_idx[i] in window, (
             f'{path} row {i}: move_idx not in its legal window'
         )
@@ -105,7 +86,6 @@ def audit_chunk(path, rng):
             f'played_uci={played[i]} (fen={fen})'
         )
 
-        # --- 6. train vs inference tensor parity ---
         serving_tensor, move_seq = _position_arrays(
             board, BOARD_ENCODING_VERSION_V3
         )
@@ -125,7 +105,6 @@ def audit_chunk(path, rng):
         if stored[0, 0, REP_CHANNELS[0]] or stored[0, 0, REP_CHANNELS[1]]:
             rep_rows += 1
 
-        # --- 4. weight schedule matches the documented cp-loss mapping ---
         cl = float(cp_loss[i])
         if target_type[i] > 0:
             expected_w = _sample_weight_from_cp_loss(

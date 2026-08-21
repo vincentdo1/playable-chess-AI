@@ -1,22 +1,7 @@
-"""Audit test 5: tiny-batch overfit through the REAL training math.
+"""Exercise the production loss path with a tiny-batch overfit test.
 
-Trains a small ChessModelV3 (64 filters x 2 blocks, CPU) on 256 real rows
-from data/train_chunks_v3 using the exact production loss path
-(mask_illegal_logits + policy_loss_for_targets + MSE value loss, batches
-built by the production collator). Two things are asserted:
-
-  a. The INITIAL policy loss equals the uniform-over-legal-moves entropy
-     (mean ln of legal-move count), not ln(vocab). If the legality mask
-     were mis-applied, the starting loss would sit near ln(4864) ~ 8.5
-     instead of ~ ln(30) ~ 3.4 — this catches mask bugs numerically.
-  b. A few hundred optimizer steps drive top-1 accuracy >= 95% and value
-     MSE to ~0 on the memorized set. If labels/gradients/masking were
-     broken, loss might still fall but accuracy against the stored labels
-     could not reach memorization levels.
-
-The run takes well under two minutes on CPU and never writes a checkpoint.
-The small architecture comes from env vars read at import time, so the test
-re-execs itself as a subprocess with the right environment.
+The test checks legal-move masking at initialization and memorization after
+training. It re-executes with a small CPU model configured before import.
 """
 
 import os
@@ -83,8 +68,7 @@ def run_child():
         acc = (masked.argmax(1) == tgt).float().mean()
         return policy_loss, value_loss, acc
 
-    # a. initial loss must equal the uniform-over-legal entropy, proving the
-    #    legality mask restricts the softmax support.
+    # Initial loss should match the uniform distribution over legal moves.
     full_batch = collate(samples)
     with torch.no_grad():
         policy0, value0, acc0 = batch_loss(full_batch, train=False)
@@ -97,7 +81,6 @@ def run_child():
         'the legality mask is probably not being applied'
     )
 
-    # b. memorize the 256 rows.
     order = np.arange(N_ROWS)
     for step in range(1, STEPS + 1):
         rng.shuffle(order)

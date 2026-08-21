@@ -1,10 +1,7 @@
-"""Reproducible model-vs-Stockfish evaluation.
+"""Run reproducible paired-opening matches against Stockfish.
 
-The default protocol plays every built-in opening twice with colors reversed,
-recording the exact configuration, artifact identities, PGNs, per-model-move
-latency, and confidence intervals. A UCI_LimitStrength result is deliberately
-reported as a result against that Stockfish setting under this harness; it is
-not a human-rating estimate.
+Records artifact identities, configuration, PGNs, timing, and confidence
+intervals. Reported Elo is relative to the configured engine, not human Elo.
 """
 
 from __future__ import annotations
@@ -65,10 +62,7 @@ def _percentile(values: list[float], quantile: float) -> float | None:
     return float(np.quantile(np.asarray(values, dtype=np.float64), quantile))
 
 
-# Two-sided 95% Student-t critical values. Evaluation runs have tens of
-# independent units, where the normal 1.96 understates the interval (t at
-# 15 df is 2.131) and would let the predeclared lower-bound gate pass on
-# evidence a real 95% interval rejects.
+# Student-t values avoid narrow normal intervals on small match samples.
 _T_CRITICAL_975 = {
     1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
     8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160,
@@ -80,11 +74,7 @@ _T_CRITICAL_975_ANCHORS = ((120, 1.980), (60, 2.000), (40, 2.021))
 
 
 def _t_critical_975(df: int) -> float:
-    """Critical value for a two-sided 95% t-interval, rounding conservatively.
-
-    Between table anchors the smaller-df (larger) value is used, so the
-    resulting interval is never narrower than the exact t-interval.
-    """
+    """Return a conservative two-sided 95% Student-t critical value."""
     if df < 1:
         raise ValueError('t interval needs at least 1 degree of freedom')
     if df in _T_CRITICAL_975:
@@ -96,11 +86,7 @@ def _t_critical_975(df: int) -> float:
 
 
 def _score_ci(scores: list[float]) -> tuple[float, float]:
-    """Student-t 95% interval over independent evaluation units.
-
-    For paired mode each unit is the mean of the two color-reversed games for
-    an opening, so color-correlated games are not counted as independent.
-    """
+    """Return a 95% interval over independent match units."""
     if len(scores) < 2:
         value = scores[0] if scores else 0.5
         return value, value
@@ -191,9 +177,7 @@ def play_game(model, engine, args, opening_name: str, opening_moves: str,
         'Black': 'Stockfish' if model_is_white else 'model',
         'Opening': opening_name,
     })
-    # Keep the prescribed opening in the PGN rather than treating the
-    # post-opening board as an opaque FEN. This makes every game independently
-    # replayable and lets reviewers audit the color-reversed pair.
+    # Preserve opening moves so each PGN is independently replayable.
     node = game
     for opening_move in board.move_stack:
         node = node.add_variation(opening_move)

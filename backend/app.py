@@ -109,9 +109,8 @@ DEFAULT_MAGNUS_VALUE_CANDIDATES = _env_int(
 )
 
 
-# MCTS for /api/move magnus. Off by default; enable with MAGNUS_USE_MCTS=1.
+# MCTS is off unless the server enables it.
 DEFAULT_MAGNUS_USE_MCTS = _env_flag('MAGNUS_USE_MCTS', default=False)
-# Shallow-search veto of material-losing policy moves (policy mode only).
 DEFAULT_MAGNUS_BLUNDER_GUARD = _env_flag('MAGNUS_BLUNDER_GUARD', default=True)
 DEFAULT_MAGNUS_BLUNDER_GUARD_DEPTH = _env_int(
     'MAGNUS_BLUNDER_GUARD_DEPTH', 2, minimum=1, maximum=6
@@ -122,8 +121,7 @@ DEFAULT_MAGNUS_BLUNDER_GUARD_MARGIN = _env_float(
 DEFAULT_MAGNUS_MCTS_SIMULATIONS = _env_int(
     'MAGNUS_MCTS_SIMULATIONS', 200, minimum=1, maximum=100000
 )
-# Hard ceiling on request-supplied sims so a public endpoint can't be forced
-# into unbounded CPU work. Raise via env if you run on stronger hardware.
+# Cap client-supplied work on the public endpoint.
 DEFAULT_MAGNUS_MCTS_MAX_SIMULATIONS = _env_int(
     'MAGNUS_MCTS_MAX_SIMULATIONS', 800, minimum=1, maximum=100000
 )
@@ -136,8 +134,7 @@ DEFAULT_MAGNUS_MCTS_C_PUCT = _env_float(
 DEFAULT_MAGNUS_MCTS_POLICY_TEMP = _env_float(
     'MAGNUS_MCTS_POLICY_TEMP', 1.5, minimum=1e-6, maximum=100.0
 )
-# Wall-clock cap per move (seconds); MCTS stops at whichever of sims/time comes
-# first. 0 = no cap. Set on CPU deploys (Railway) so a move can't run long.
+# MCTS stops at the simulation or time limit; zero disables the time limit.
 DEFAULT_MAGNUS_MCTS_TIME_LIMIT = _env_float(
     'MAGNUS_MCTS_TIME_LIMIT', 0, minimum=0.0, maximum=120.0
 )
@@ -167,7 +164,6 @@ except Exception as e:
             'Magnus is required but its model could not be loaded'
         ) from e
 
-# Optional MCTS; falls back to raw policy if the module isn't importable.
 _mcts_fn = None
 try:
     from inference.mcts_player import (
@@ -333,8 +329,7 @@ def _get_magnus_move(board, data):
     except ValueError as exc:
         return {'error': str(exc)}, 400
 
-    # The server flag is an allow-list, not merely a default. A client may opt
-    # into a cheaper policy move, but cannot turn expensive MCTS on server-side.
+    # Clients may disable MCTS, but cannot enable server-side work.
     use_mcts = DEFAULT_MAGNUS_USE_MCTS and requested_mcts
     if use_mcts and _mcts_fn is not None:
         try:

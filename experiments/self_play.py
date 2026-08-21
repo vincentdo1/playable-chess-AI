@@ -1,21 +1,8 @@
-"""Generate self-play training data using MCTS-guided games.
+"""Generate MCTS self-play positions, visit targets, and game outcomes.
 
-For each move MCTS picks the move; afterwards we keep the position the search
-saw (board tensor + move history), the MCTS visit-count distribution over legal
-children, and the eventual outcome from this position's side-to-move POV. A net
-that imitates the visit distribution implements the AlphaZero policy
-improvement operator, so the next round of MCTS is stronger.
-
-Correctness details that matter here:
-  - Dirichlet noise at the root, or every self-play game looks identical and
-    the buffer collapses.
-  - Two-stage temperature: 1 for the first ``temperature_threshold`` moves
-    (sample from visits), 0 (greedy) afterwards.
-  - Visit distributions stored sparsely (legal moves only) in the side-to-
-    move's perspective via move_to_policy_index(..., flip=is_black), matching
-    what the model expects at training and inference time.
-  - The value target is +1/0/-1 from the position's side-to-move POV, derived
-    once at game end and broadcast to every recorded position.
+Root noise and an early-game sampling temperature diversify play. Policy
+targets contain legal moves only, and policy/value targets use the side-to-move
+perspective expected by training and inference.
 """
 
 from __future__ import annotations
@@ -120,8 +107,6 @@ def play_self_play_game(
         )
 
         if not root.children:
-            # No legal moves should have been caught by the game-over check
-            # above, but be defensive.
             break
 
         legal_indices_for_pos: list[int] = []
@@ -155,7 +140,6 @@ def play_self_play_game(
 
         board.push(move)
 
-    # Determine the game's outcome.
     if terminated_by_move_limit:
         result_str = '1/2-1/2'
         winner: chess.Color | None = None
@@ -176,8 +160,6 @@ def play_self_play_game(
     if winner is not None:
         for i, is_white in enumerate(sides_white):
             value_targets[i] = 1.0 if (winner == chess.WHITE) == is_white else -1.0
-    # else: all zeros (draw)
-
     uses_history = spec['uses_move_history']
     if T == 0:
         return GameRecord(
@@ -256,8 +238,7 @@ def _save_chunk(
     for r in records:
         all_legal_indices.append(r.legal_move_indices)
         all_visit_counts.append(r.visit_counts)
-        # Offsets for this game (T+1) shifted by running offset, then drop the
-        # leading zero so we don't duplicate the cumulative boundary.
+        # Rebase each game's sparse-policy offsets without duplicating zero.
         shifted = r.legal_move_offsets[1:] + running
         offsets_parts.append(shifted)
         running += len(r.legal_move_indices)

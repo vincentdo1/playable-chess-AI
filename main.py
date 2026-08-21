@@ -33,7 +33,6 @@ class ChessGame:
         self.magnus_value_weight = magnus_value_weight
         self.magnus_value_candidates = magnus_value_candidates
 
-        # Load Magnus model lazily — only when actually needed.
         self._magnus_model = None
         self._predict_fn   = None
         if white_player == "magnus_carlsen" or black_player == "magnus_carlsen":
@@ -96,11 +95,10 @@ class ChessGame:
         if self.board.is_game_over():
             return
 
-        # Dispatch based on whose turn it is — argument order never matters.
         current = self.white_player if self.board.turn == chess.WHITE else self.black_player
 
         if current == "you":
-            return  # human move is handled by handle_events()
+            return
 
         elif current == "engine":
             ai_move = chess_player.get_best_move(self.board, 1)

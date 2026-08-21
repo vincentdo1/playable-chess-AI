@@ -1,9 +1,4 @@
-"""Watch two trained checkpoints play each other in a Pygame window.
-
-Reuses the board/piece art under pieces/. Each side moves via the raw policy
-head or MCTS; moves are computed on a background thread so the window stays
-responsive. Both checkpoints must use the current architecture â€” for an
-old-architecture checkpoint on another branch use cross_model_match.py.
+"""Watch two compatible checkpoints play in a Pygame window.
 
 Controls: SPACE pause/resume, R restart, ESC/Q quit.
 """
@@ -82,13 +77,11 @@ class Arena:
         self.delay = args.delay
         self.max_plies = args.max_plies
 
-        # Board background (reuse pieces/board.png like main.py).
         image = Image.open('pieces/board.png').resize((self.size, self.size))
         self.board_img = pygame.image.fromstring(
             image.tobytes(), image.size, image.mode,
         )
 
-        # Cache scaled piece sprites: key = symbol like 'P_w'.
         self._piece_cache: dict[str, pygame.Surface] = {}
 
         from load_model import load_trained_model
